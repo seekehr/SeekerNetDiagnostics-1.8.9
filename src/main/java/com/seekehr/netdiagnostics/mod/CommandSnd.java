@@ -1,6 +1,7 @@
 package com.seekehr.netdiagnostics.mod;
 
 import com.seekehr.netdiagnostics.core.net.Target;
+import com.seekehr.netdiagnostics.gui.GuiHudEditor;
 import com.seekehr.netdiagnostics.gui.GuiMonitor;
 import net.minecraft.command.CommandBase;
 import net.minecraft.command.ICommandSender;
@@ -27,7 +28,7 @@ public final class CommandSnd extends CommandBase {
 
     @Override
     public String getCommandUsage(ICommandSender sender) {
-        return "/snd [host[:port]] | /snd stop | /snd hud";
+        return "/snd [host [port]] | /snd hud | /snd stop | /snd help";
     }
 
     @Override
@@ -54,14 +55,15 @@ public final class CommandSnd extends CommandBase {
             return;
         }
         if ("hud".equals(sub)) {
-            NetDiag.hud = !NetDiag.hud;
-            Chat.info("Ping HUD " + (NetDiag.hud ? "on" : "off") + ".");
+            ClientEvents.openNextTick(new GuiHudEditor());
             return;
         }
         if ("help".equals(sub)) {
             Chat.info("/snd - monitor the server you're on");
             Chat.info("/snd <host> [port] - monitor another server");
-            Chat.info("/snd stop - stop pinging  |  /snd hud - toggle the ping HUD");
+            Chat.info("/snd hud - drag the ping HUD or turn it on/off");
+            Chat.info("/snd stop - stop pinging");
+            Chat.info("/snd help - show this list");
             return;
         }
         if (NetDiag.currentServer() == null) {

@@ -7,8 +7,10 @@ import com.seekehr.netdiagnostics.core.stats.StatSummary;
 import com.seekehr.netdiagnostics.mod.NetDiag;
 import net.minecraft.client.gui.GuiButton;
 import net.minecraft.client.gui.GuiScreen;
+import net.minecraft.client.gui.ScaledResolution;
 import org.lwjgl.input.Keyboard;
 import org.lwjgl.input.Mouse;
+import org.lwjgl.opengl.GL11;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -228,29 +230,35 @@ public final class GuiMonitor extends GuiBase {
         }
     }
 
+    private static final int GRAPH_MAX_POINTS = 120;
+    private static final int CURVE_STEPS = 6;
+
+    /** Smooth ping curve with a soft fill, tab-list ping line, failure markers and hover tooltips. */
     private void drawGraph(PingMonitor m, PingMonitor.Snapshot s, int x, int y, int w, int h, int mx, int my) {
         Draw.card(x, y, w, h, Theme.CARD, Theme.BORDER);
         int lx = x + 22;
         int gx0 = lx;
-        int gx1 = x + w - 4;
+        int gx1 = x + w - 6;
         int gy0 = y + 14;
         int gy1 = y + h - 4;
         int gw = gx1 - gx0;
         int gh = gy1 - gy0;
-        String legend = s.samples.size() + " samples";
-        Draw.text(fontRendererObj, legend, x + 4, y + 3, Theme.TEXT_FAINT);
+        Draw.text(fontRendererObj, s.samples.size() + " samples", x + 4, y + 3, Theme.TEXT_FAINT);
         int lgx = x + w - 4;
         lgx = legendItem("fail", Theme.BAD, lgx, y + 3);
-        if (NetDiag.isGameServer(m)) {
+        boolean game = NetDiag.isGameServer(m);
+        if (game) {
             lgx = legendItem("tab-list ping", Theme.ACCENT, lgx, y + 3);
         }
         legendItem("ping", Theme.GOOD, lgx, y + 3);
-        if (gw < 10 || gh < 10) {
+        if (gw < 20 || gh < 10) {
             return;
         }
+
         List<PingMonitor.Sample> all = s.samples;
-        int barW = all.size() * 3 <= gw ? 3 : 2;
-        int count = Math.min(all.size(), gw / barW);
+        int cap = Math.max(2, Math.min(GRAPH_MAX_POINTS, gw / 3));
+        double sp = gw / (double) (cap - 1);
+        int count = Math.min(all.size(), cap);
         List<PingMonitor.Sample> vis = all.subList(all.size() - count, all.size());
         double max = 40;
         for (PingMonitor.Sample v : vis) {
@@ -263,42 +271,135 @@ public final class GuiMonitor extends GuiBase {
         }
         double step = niceStep(max / 4);
         double yMax = Math.ceil(max * 1.1 / step) * step;
+
+        // point positions (NaN y = failed sample)
+        float[] px = new float[count];
+        float[] py = new float[count];
+        for (int i = 0; i < count; i++) {
+            PingMonitor.Sample v = vis.get(i);
+            px[i] = (float) (gx1 - (count - 1 - i) * sp);
+            py[i] = v.ok() ? (float) (gy1 - v.pingMs / yMax * gh) : Float.NaN;
+        }
+
+        int hovered = -1;
+        if (count > 0 && mx >= gx0 - sp / 2 && mx <= gx1 + sp / 2 && my >= gy0 && my <= gy1) {
+            int idx = count - 1 - (int) Math.round((gx1 - mx) / sp);
+            if (idx >= 0 && idx < count) {
+                hovered = idx;
+            }
+        }
+
+        // ---- pass 1: quads (grid, failures, fill under curve, median, hover guide, lone points)
+        Draw.batch();
         for (double g = 0; g <= yMax + 1e-9; g += step) {
             int gy = (int) (gy1 - g / yMax * gh);
-            Draw.rect(gx0, gy, gx1, gy + 1, Theme.GRID);
-            Draw.textRight(fontRendererObj, String.valueOf((int) g), lx - 3, gy - 4, Theme.TEXT_FAINT);
+            Draw.quad(gx0, gy, gx1, gy + 1, Theme.GRID);
+        }
+        int failColor = Theme.withAlpha(Theme.BAD, 0.30f);
+        float half = (float) Math.max(1, sp / 2);
+        for (int i = 0; i < count; i++) {
+            if (Float.isNaN(py[i])) {
+                Draw.quad(px[i] - half, gy0, px[i] + half, gy1, failColor);
+            }
+        }
+        for (int i = 0; i + 1 < count; i++) {
+            if (Float.isNaN(py[i]) || Float.isNaN(py[i + 1])) {
+                continue;
+            }
+            int c1 = Theme.latencyColor(vis.get(i).pingMs);
+            int c2 = Theme.latencyColor(vis.get(i + 1).pingMs);
+            float xa = px[i];
+            float ya = py[i];
+            for (int k = 1; k <= CURVE_STEPS; k++) {
+                float t = k / (float) CURVE_STEPS;
+                float xb = px[i] + (px[i + 1] - px[i]) * t;
+                float yb = curveY(py, i, t, gy0, gy1);
+                int c = Theme.lerp(c1, c2, t);
+                Draw.vertex(xa, gy1, Theme.withAlpha(c, 0.02f));
+                Draw.vertex(xb, gy1, Theme.withAlpha(c, 0.02f));
+                Draw.vertex(xb, yb, Theme.withAlpha(c, 0.28f));
+                Draw.vertex(xa, ya, Theme.withAlpha(c, 0.28f));
+                xa = xb;
+                ya = yb;
+            }
+        }
+        for (int i = 0; i < count; i++) {
+            boolean lone = !Float.isNaN(py[i]) && (i == 0 || Float.isNaN(py[i - 1]))
+                    && (i == count - 1 || Float.isNaN(py[i + 1]));
+            if (lone) {
+                Draw.quad(px[i] - 1, py[i] - 1, px[i] + 1, py[i] + 1, Theme.latencyColor(vis.get(i).pingMs));
+            }
         }
         if (!s.ping.isEmpty()) {
             int my0 = (int) (gy1 - s.ping.median / yMax * gh);
             for (int dx = gx0; dx < gx1; dx += 6) {
-                Draw.rect(dx, my0, Math.min(gx1, dx + 3), my0 + 1, Theme.TEXT_FAINT);
+                Draw.quad(dx, my0, Math.min(gx1, dx + 3), my0 + 1, Theme.withAlpha(Theme.TEXT_FAINT, 0.6f));
             }
         }
-        int hovered = -1;
-        for (int i = 0; i < vis.size(); i++) {
-            PingMonitor.Sample v = vis.get(i);
-            int bx = gx1 - (vis.size() - i) * barW;
-            if (mx >= bx && mx < bx + barW && my >= gy0 && my <= gy1) {
-                hovered = i;
+        if (hovered >= 0) {
+            Draw.quad(px[hovered], gy0, px[hovered] + 1, gy1, 0x50FFFFFF);
+        }
+        Draw.flush();
+
+        // ---- pass 2: lines (ping curve, tab-list ping)
+        GL11.glEnable(GL11.GL_LINE_SMOOTH);
+        GL11.glHint(GL11.GL_LINE_SMOOTH_HINT, GL11.GL_NICEST);
+        GL11.glLineWidth(1.5f * new ScaledResolution(mc).getScaleFactor());
+        Draw.batch(GL11.GL_LINES);
+        for (int i = 0; i + 1 < count; i++) {
+            if (Float.isNaN(py[i]) || Float.isNaN(py[i + 1])) {
+                continue;
             }
-            if (v.ok()) {
-                int by = (int) (gy1 - v.pingMs / yMax * gh);
-                Draw.rect(bx, Math.min(by, gy1 - 1), bx + barW - 1, gy1, Theme.latencyColor(v.pingMs));
-            } else {
-                Draw.rect(bx, gy0, bx + barW - 1, gy1, Theme.withAlpha(Theme.BAD, 0.45f));
+            int c1 = Theme.latencyColor(vis.get(i).pingMs);
+            int c2 = Theme.latencyColor(vis.get(i + 1).pingMs);
+            float xa = px[i];
+            float ya = py[i];
+            int ca = c1;
+            for (int k = 1; k <= CURVE_STEPS; k++) {
+                float t = k / (float) CURVE_STEPS;
+                float xb = px[i] + (px[i + 1] - px[i]) * t;
+                float yb = curveY(py, i, t, gy0, gy1);
+                int cb = Theme.lerp(c1, c2, t);
+                Draw.line(xa, ya, xb, yb, ca, cb);
+                xa = xb;
+                ya = yb;
+                ca = cb;
             }
-            if (v.tabPingMs >= 0) {
-                int ty = (int) (gy1 - v.tabPingMs / yMax * gh);
-                Draw.rect(bx, ty - 1, bx + barW, ty + 1, Theme.ACCENT);
+        }
+        if (game) {
+            int prev = -1;
+            for (int i = 0; i < count; i++) {
+                int tab = vis.get(i).tabPingMs;
+                if (tab < 0) {
+                    prev = -1;
+                    continue;
+                }
+                if (prev >= 0) {
+                    float ya = (float) (gy1 - vis.get(prev).tabPingMs / yMax * gh);
+                    float yb = (float) (gy1 - tab / yMax * gh);
+                    Draw.line(px[prev], ya, px[i], yb, Theme.ACCENT, Theme.ACCENT);
+                }
+                prev = i;
             }
+        }
+        Draw.flush();
+        GL11.glLineWidth(1f);
+        GL11.glDisable(GL11.GL_LINE_SMOOTH);
+
+        // ---- text and hover
+        for (double g = 0; g <= yMax + 1e-9; g += step) {
+            int gy = (int) (gy1 - g / yMax * gh);
+            Draw.textRight(fontRendererObj, String.valueOf((int) g), lx - 3, gy - 4, Theme.TEXT_FAINT);
         }
         if (vis.isEmpty()) {
             Draw.textCentered(fontRendererObj, m.status, (gx0 + gx1) / 2f, (gy0 + gy1) / 2f - 4, Theme.TEXT_DIM);
         }
         if (hovered >= 0) {
             PingMonitor.Sample v = vis.get(hovered);
-            int bx = gx1 - (vis.size() - hovered) * barW;
-            Draw.rect(bx, gy0, bx + barW - 1, gy1, 0x40FFFFFF);
+            float hy = Float.isNaN(py[hovered]) ? (gy0 + gy1) / 2f : py[hovered];
+            int dot = v.ok() ? Theme.latencyColor(v.pingMs) : Theme.BAD;
+            Draw.rect(px[hovered] - 2, hy - 2, px[hovered] + 3, hy + 3, 0xFF000000);
+            Draw.rect(px[hovered] - 1, hy - 1, px[hovered] + 2, hy + 2, dot);
             List<String> tip = new ArrayList<String>();
             tip.add(((System.currentTimeMillis() - v.time) / 1000) + " s ago");
             tip.add(v.ok() ? "Ping: " + ms(v.pingMs) + " ms" : "Failed: " + v.outcome.label);
@@ -315,11 +416,34 @@ public final class GuiMonitor extends GuiBase {
         }
     }
 
+    /** Catmull-Rom between points i and i+1 (both valid); missing neighbours are clamped; result kept in bounds. */
+    private static float curveY(float[] py, int i, float t, int gy0, int gy1) {
+        float p1 = py[i];
+        float p2 = py[i + 1];
+        float p0 = i > 0 && !Float.isNaN(py[i - 1]) ? py[i - 1] : p1;
+        float p3 = i + 2 < py.length && !Float.isNaN(py[i + 2]) ? py[i + 2] : p2;
+        float t2 = t * t;
+        float t3 = t2 * t;
+        float v = 0.5f * (2 * p1 + (-p0 + p2) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2
+                + (-p0 + 3 * p1 - 3 * p2 + p3) * t3);
+        return Math.max(gy0, Math.min(gy1, v));
+    }
+
     private int legendItem(String label, int color, int right, int y) {
         int x = right - fontRendererObj.getStringWidth(label);
         Draw.text(fontRendererObj, label, x, y, Theme.TEXT_FAINT);
         Draw.rect(x - 7, y + 2, x - 3, y + 6, color);
         return x - 12;
+    }
+
+    private static double niceStep(double raw) {
+        double[] steps = {5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000};
+        for (double st : steps) {
+            if (st >= raw) {
+                return st;
+            }
+        }
+        return 5000;
     }
 
     private void drawRoute(PingMonitor m, PingMonitor.Snapshot s, int x, int y, int w, int mx, int my) {
@@ -481,15 +605,5 @@ public final class GuiMonitor extends GuiBase {
 
     private static String fmtInterval(int ms) {
         return ms % 1000 == 0 ? (ms / 1000) + "s" : String.format(Locale.ROOT, "%.1fs", ms / 1000.0);
-    }
-
-    private static double niceStep(double raw) {
-        double[] steps = {5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000};
-        for (double st : steps) {
-            if (st >= raw) {
-                return st;
-            }
-        }
-        return 5000;
     }
 }

@@ -63,7 +63,7 @@ Join a server and type `/snd`. Commands run locally and are never sent to the se
 | `/snd` | Start monitoring the server you're on and open the monitor |
 | `/snd <host> [port]` | Monitor another server instead |
 | `/snd stop` | Stop pinging |
-| `/snd hud` | Toggle the small ping line shown in-game while monitoring |
+| `/snd hud` | Drag the in-game ping line to a new spot, or turn it on/off (saved in `config/seekernetdiagnostics.cfg`) |
 
 The monitor screen has:
 

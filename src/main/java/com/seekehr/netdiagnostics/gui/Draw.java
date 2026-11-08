@@ -38,6 +38,55 @@ public final class Draw {
         end();
     }
 
+    // ------------------------------------------------------------------ batched rects
+
+    /**
+     * Starts a batch of flat-coloured rectangles drawn with a single draw call. Call {@link #quad} any number of
+     * times, then {@link #flush}. Nothing else that uses the tessellator may be drawn in between (no text).
+     */
+    public static void batch() {
+        batch(GL11.GL_QUADS);
+    }
+
+    /** Starts a batch in the given GL mode (GL_QUADS for {@link #quad}, GL_LINES for {@link #line}). */
+    public static void batch(int glMode) {
+        GlStateManager.enableBlend();
+        GlStateManager.disableTexture2D();
+        GlStateManager.tryBlendFuncSeparate(770, 771, 1, 0);
+        GlStateManager.shadeModel(GL11.GL_SMOOTH);
+        GlStateManager.color(1f, 1f, 1f, 1f);
+        Tessellator.getInstance().getWorldRenderer().begin(glMode, DefaultVertexFormats.POSITION_COLOR);
+    }
+
+    public static void vertex(float x, float y, int color) {
+        Tessellator.getInstance().getWorldRenderer().pos(x, y, 0)
+                .color((color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF, (color >>> 24) & 0xFF).endVertex();
+    }
+
+    /** One segment in a GL_LINES batch, colour blended from c1 to c2. */
+    public static void line(float x1, float y1, float x2, float y2, int c1, int c2) {
+        vertex(x1, y1, c1);
+        vertex(x2, y2, c2);
+    }
+
+    public static void quad(float x1, float y1, float x2, float y2, int color) {
+        int a = (color >>> 24) & 0xFF;
+        int r = (color >> 16) & 0xFF;
+        int g = (color >> 8) & 0xFF;
+        int b = color & 0xFF;
+        WorldRenderer wr = Tessellator.getInstance().getWorldRenderer();
+        wr.pos(x1, y2, 0).color(r, g, b, a).endVertex();
+        wr.pos(x2, y2, 0).color(r, g, b, a).endVertex();
+        wr.pos(x2, y1, 0).color(r, g, b, a).endVertex();
+        wr.pos(x1, y1, 0).color(r, g, b, a).endVertex();
+    }
+
+    public static void flush() {
+        Tessellator.getInstance().draw();
+        GlStateManager.shadeModel(GL11.GL_FLAT);
+        end();
+    }
+
     /** Filled rectangle with rounded corners of radius r. */
     public static void roundRect(float x, float y, float w, float h, float r, int color) {
         r = Math.min(r, Math.min(w, h) / 2f);

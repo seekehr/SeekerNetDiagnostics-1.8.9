@@ -25,7 +25,6 @@ public final class NetDiag {
     private static volatile Traceroute traceroute;
     private static volatile int tabPing = -1;
     private static volatile Target gameTarget;
-    public static volatile boolean hud = true;
 
     private NetDiag() {
     }
