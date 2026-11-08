@@ -1,24 +1,22 @@
 # SeekerNetDiagnostics
 
-Client-side ping testing for **Minecraft 1.8.9 / Forge 11.15.1.2318**. It pings Minecraft servers
-from inside the running game process, so the tests take the same route as your game connection
-(including ExitLag, if ExitLag handles Minecraft). It also compares ExitLag routes side by side.
+In-game ping monitor for **Minecraft 1.8.9 / Forge 11.15.1.2318**. It pings the server from inside the
+game process, so the pings take the same route as your game connection (including ExitLag, if it
+handles Minecraft), and shows everything on one screen.
 
 **Why not `ping` or `tracert`?** ExitLag optimizes traffic per program. Command-line tools are separate
-programs (and `ping` uses ICMP, which ExitLag doesn't route), so they show your normal route. This mod's
-connections come from `javaw.exe` itself.
+programs (and `ping` uses ICMP, which ExitLag doesn't route), so they show your normal route.
 
 ## Safety
 
-- Never touches game packets. Tests use their own separate connections.
-- Never joins a server. Each sample is a server-list ping (status + ping/pong), the same thing the Multiplayer menu does.
-- Commands run locally and are never sent to the server.
-- No background traffic. One connection at a time, at least 500 ms apart, only to the host you choose.
-- Exports contain no tokens, account IDs, public IP or local addresses.
+- Never touches game packets. Pings use their own separate connections.
+- Never joins a server. Each ping is a server-list ping (status + ping/pong), like the Multiplayer menu.
+- One connection at a time, at most one every 0.5 s, only to the server you choose.
+- Pinging stops automatically when you leave the server.
 
 ## Install
 
-Put `SeekerNetDiagnostics-1.8.9-1.0.0.jar` in your Forge 1.8.9 instance's `mods` folder (Prism: *Edit → Mods → Add file*).
+Put `SeekerNetDiagnostics-1.8.9-2.0.0.jar` in your Forge 1.8.9 instance's `mods` folder (Prism: *Edit → Mods → Add file*).
 
 ## Build
 
@@ -56,46 +54,35 @@ remove `-Ddevauth.enabled=true` from `clientJvmArgs`.
 rejects. The `fetchAssetsHttps` task in `build.gradle` fetches them over HTTPS (SHA-1 verified) before
 `getAssets` runs.
 
-## Commands
+## Usage
 
-Type these in chat. They run only on your machine and are never sent to the server. `/snd`,
-`/seekernetdiag` and `/seekernetdiagnostics` are the same command.
+Join a server and type `/snd`. Commands run locally and are never sent to the server.
 
-| Command | What it does | When to use it |
-|---|---|---|
-| `/snd` | Opens the dashboard: Test My Connection, Test an IP, Compare ExitLag Routes | Most of the time. Everything below is also a button. |
-| `/snd test <host> [port] [quick\|detailed]` | Pings the server 10 times (50 with `detailed`), one new connection each, and prints the results in chat. With no port, the server's SRV record is used, like the vanilla client. | To check your real ping and stability to a server, e.g. `/snd test 203.27.106.53` |
-| `/snd compare` | Opens route comparison: baseline, then each new route, side by side with a recommendation | To decide which ExitLag route or setting is better |
-| `/snd compare status` | Prints each profile's stats and the recommendation | To check a comparison without the GUI |
-| `/snd export` | Writes JSON plus two CSVs (samples and summary) to `config/netscope/reports/` | To keep or share results, or open them in a spreadsheet |
-| `/snd history` | Prints your last 8 test results | To recall earlier numbers |
-| `/snd settings` | Ping counts, interval, timeout, export options | To change test size or timing |
-| `/snd cancel` | Stops the running test and any queued tests | If a test is taking too long, e.g. a server that keeps timing out |
-| `/snd help` | Lists the commands in chat | When you forget the syntax |
+| Command | What it does |
+|---|---|
+| `/snd` | Start monitoring the server you're on and open the monitor |
+| `/snd <host> [port]` | Monitor another server instead |
+| `/snd stop` | Stop pinging |
+| `/snd hud` | Toggle the small ping line shown in-game while monitoring |
 
-**Comparing ExitLag routes:**
+The monitor screen has:
 
-1. Turn ExitLag on and join the server.
-2. Run `/snd`, then click **Compare ExitLag Routes** and **Start Baseline**.
-3. Change the route in ExitLag yourself, then click **Test New Route**.
-4. Click **Repeat** a few times. The screen tells you which profile to switch ExitLag to next.
-5. Read the recommendation, then run `/snd export`.
+- **Stats:** now, average, median, min, max, p95, p99, jitter, loss and spikes since the last reset.
+- **Live graph:** one bar per ping, red for failures, blue marks for the tab-list ping. Hover a bar for details.
+- **Route:** what you typed, the SRV record, DNS answers, the IP being pinged, the game socket's remote and
+  local address, which network adapter the game and the pings leave through, TCP connect time, and whether a
+  local proxy (ExitLag/VPN) is intercepting the connection. Also tab-list ping vs measured ping and server info.
+- **Traceroute:** runs the system `tracert` to the server IP and lists each hop. This is your normal ISP
+  route: it uses ICMP, which ExitLag doesn't carry.
 
-Dashboard keys: `1`/`2`/`3` for the main actions, `↑`/`↓` to select a result, `Ctrl+F` to search, `Tab`/`Enter` to navigate, `E` to export, `Esc` to close.
+Buttons: Pause (`Space`), interval (0.5/1/2/5 s), Reset (`R`), Trace route (`T`), Copy summary (`C`).
+Closing the screen keeps pinging in the background with the HUD; `/snd` reopens it.
 
 ## What the numbers mean
 
-- **Ping (the result):** the round trip of a Minecraft ping packet, from sending it until the server's pong arrives. Each sample is a fresh connection from the game process. This is an application-level, end-to-end time and should be close to the ping the tab list shows. A failed sample never counts as a ping.
-- **TCP connect (diagnostic only):** with ExitLag on, Minecraft's connections are accepted by ExitLag on your own PC, so connect time can be under 1 ms. When that happens with a public server address, the mod reports that **a local proxy is handling the connection**. This shows interception, not which route ExitLag chose. The "Proxy" column on the dashboard marks these runs.
-- **Failures:** each one is labelled refused, connect timeout, no response, no pong, not Minecraft, DNS failure or unreachable. A timeout doesn't prove packet loss.
-- **Stats:** percentiles use linear interpolation (R-7). Jitter is the mean absolute difference between consecutive pings.
-- **Route comparison:** you change ExitLag yourself between runs, then repeat in A-B-B-A order. The verdict uses a 95% bootstrap confidence interval on the median difference. It says "no clear winner" when results overlap, and asks for more data below 10 successful pings.
-- **ExitLag:** the mod can't verify which route ExitLag used. Check ExitLag's real-time monitor.
-
-## Limitations
-
-- Only Minecraft servers can be tested. Other ports have no ping/pong to time, and behind ExitLag a bare TCP connect only measures your own PC.
-- No traceroute. A reliable one needs raw sockets and admin rights, and ICMP-based traceroute bypasses ExitLag.
-- Gradle 2.7 and ForgeGradle 2.1 are old, build-time-only tools. The mod jar bundles no third-party libraries. JUnit 4.13.2 (tests) and DevAuth (dev client login) are not packaged.
-
-Settings live in `config/seekernetdiagnostics.cfg` and test history in `config/netscope/history.json`.
+- **Ping:** time from sending a Minecraft ping packet until the pong arrives, on a fresh connection each time.
+  It should be close to the tab-list ping. A failed ping never counts as a ping; it counts as loss.
+- **Spikes:** pings above 1.5 x median + 20 ms.
+- **Jitter:** mean absolute difference between consecutive pings.
+- **TCP connect under 1.5 ms** to a public IP means a local proxy accepted the connection, not the server.
+  It shows interception, not which route ExitLag picked.

@@ -2,7 +2,7 @@
 {
   "modid": "seekernetdiagnostics",
   "name": "SeekerNetDiagnostics",
-  "description": "Client-side network diagnostics: TCP handshake timing, Minecraft status ping, live connection monitoring and route comparison. Never modifies or injects game packets.",
+  "description": "In-game ping monitor: live Minecraft ping graph and stats, connection route info and traceroute. Never modifies game packets.",
   "version": "${version}",
   "mcversion": "${mcversion}",
   "url": "",

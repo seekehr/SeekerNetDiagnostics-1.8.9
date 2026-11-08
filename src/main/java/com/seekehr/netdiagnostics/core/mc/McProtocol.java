@@ -1,6 +1,9 @@
 package com.seekehr.netdiagnostics.core.mc;
 
-import com.seekehr.netdiagnostics.core.json.Json;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
@@ -8,8 +11,6 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.Charset;
-import java.util.List;
-import java.util.Map;
 
 /**
  * Encoding/decoding of the Minecraft server-list-ping ("status") protocol as spoken by 1.7–1.8.9
@@ -140,48 +141,64 @@ public final class McProtocol {
     }
 
     public static StatusInfo parseStatus(String json, int maxChars) {
-        Object root = Json.parse(json, maxChars, 64);
-        Map<String, Object> m = Json.obj(root);
-        if (m == null) {
-            throw new Json.JsonException("status response is not a JSON object");
+        if (json.length() > maxChars) {
+            throw new IllegalArgumentException("status response is too large");
         }
+        JsonElement root = new JsonParser().parse(json);
+        if (!root.isJsonObject()) {
+            throw new IllegalArgumentException("status response is not a JSON object");
+        }
+        JsonObject m = root.getAsJsonObject();
         StatusInfo s = new StatusInfo();
-        Map<String, Object> version = Json.obj(m.get("version"));
-        s.versionName = stripFormatting(Json.str(version, "name", null));
-        s.protocol = (int) Json.num(version, "protocol", -1);
-        Map<String, Object> players = Json.obj(m.get("players"));
-        s.onlinePlayers = (int) Json.num(players, "online", -1);
-        s.maxPlayers = (int) Json.num(players, "max", -1);
-        Object desc = m.get("description");
+        JsonObject version = obj(m, "version");
+        s.versionName = stripFormatting(str(version, "name"));
+        s.protocol = num(version, "protocol");
+        JsonObject players = obj(m, "players");
+        s.onlinePlayers = num(players, "online");
+        s.maxPlayers = num(players, "max");
         StringBuilder sb = new StringBuilder();
-        flattenChat(desc, sb, 0);
+        flattenChat(m.get("description"), sb, 0);
         s.motd = stripFormatting(sb.toString()).trim();
-        s.hasFavicon = m.get("favicon") instanceof String;
-        Map<String, Object> modinfo = Json.obj(m.get("modinfo"));
-        s.modType = Json.str(modinfo, "type", null);
+        JsonElement fav = m.get("favicon");
+        s.hasFavicon = fav != null && fav.isJsonPrimitive() && fav.getAsJsonPrimitive().isString();
+        s.modType = str(obj(m, "modinfo"), "type");
         return s;
     }
 
-    private static void flattenChat(Object o, StringBuilder sb, int depth) {
-        if (o == null || depth > 16 || sb.length() > 512) {
+    private static JsonObject obj(JsonObject o, String key) {
+        JsonElement e = o == null ? null : o.get(key);
+        return e != null && e.isJsonObject() ? e.getAsJsonObject() : null;
+    }
+
+    private static String str(JsonObject o, String key) {
+        JsonElement e = o == null ? null : o.get(key);
+        return e != null && e.isJsonPrimitive() ? e.getAsString() : null;
+    }
+
+    private static int num(JsonObject o, String key) {
+        JsonElement e = o == null ? null : o.get(key);
+        if (e == null || !e.isJsonPrimitive() || !e.getAsJsonPrimitive().isNumber()) {
+            return -1;
+        }
+        return e.getAsInt();
+    }
+
+    private static void flattenChat(JsonElement o, StringBuilder sb, int depth) {
+        if (o == null || o.isJsonNull() || depth > 16 || sb.length() > 512) {
             return;
         }
-        if (o instanceof String) {
-            sb.append((String) o);
-            return;
-        }
-        Map<String, Object> m = Json.obj(o);
-        if (m != null) {
-            Object text = m.get("text");
-            if (text instanceof String) {
-                sb.append((String) text);
+        if (o.isJsonPrimitive()) {
+            sb.append(o.getAsString());
+        } else if (o.isJsonObject()) {
+            JsonObject m = o.getAsJsonObject();
+            String text = str(m, "text");
+            if (text != null) {
+                sb.append(text);
             }
             flattenChat(m.get("extra"), sb, depth + 1);
-            return;
-        }
-        List<Object> l = Json.arr(o);
-        if (l != null) {
-            for (Object e : l) {
+        } else if (o.isJsonArray()) {
+            JsonArray a = o.getAsJsonArray();
+            for (JsonElement e : a) {
                 flattenChat(e, sb, depth + 1);
             }
         }

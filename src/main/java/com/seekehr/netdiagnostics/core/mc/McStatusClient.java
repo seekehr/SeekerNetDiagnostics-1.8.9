@@ -41,6 +41,8 @@ public final class McStatusClient {
         public int connectPort;
         public String handshakeHost;
         public String remoteAddress;
+        /** Local address the probe socket was bound to (shows which network adapter carried it). */
+        public java.net.InetAddress localAddress;
         public ProbeOutcome tcpOutcome = ProbeOutcome.UNKNOWN;
         public double tcpConnectMs = Double.NaN;
         public boolean statusOk;
@@ -110,6 +112,7 @@ public final class McStatusClient {
                 return r;
             }
             r.tcpConnectMs = (System.nanoTime() - t0) / 1e6;
+            r.localAddress = socket.getLocalAddress();
             r.tcpOutcome = ProbeOutcome.SUCCESS;
             if (cancel != null && cancel.get()) {
                 r.failedStage = Stage.STATUS_REQUEST;
