@@ -144,13 +144,29 @@ public final class NetDiag {
 
     private static Field channelField;
 
+    private static final GameSocket NO_SOCKET = new GameSocket();
+    private static NetworkManager cachedManager;
+    private static GameSocket cachedSocket;
+
+    /**
+     * Cached per connection: the adapter lookup ({@link java.net.NetworkInterface#getByInetAddress}) is very slow on Windows
+     * and this is called every frame by the Route tab.
+     */
     public static GameSocket gameSocket() {
-        GameSocket g = new GameSocket();
         NetHandlerPlayClient h = Minecraft.getMinecraft().getNetHandler();
         if (h == null || currentServer() == null) {
-            return g;
+            return NO_SOCKET;
         }
         NetworkManager nm = h.getNetworkManager();
+        if (nm != cachedManager || cachedSocket == null) {
+            cachedSocket = readGameSocket(nm);
+            cachedManager = nm;
+        }
+        return cachedSocket;
+    }
+
+    private static GameSocket readGameSocket(NetworkManager nm) {
+        GameSocket g = new GameSocket();
         g.remote = describe(nm.getRemoteAddress());
         Channel ch = channel(nm);
         if (ch != null) {

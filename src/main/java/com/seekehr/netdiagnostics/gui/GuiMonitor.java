@@ -1,5 +1,6 @@
 package com.seekehr.netdiagnostics.gui;
 
+import com.seekehr.netdiagnostics.core.dns.AsnLookup;
 import com.seekehr.netdiagnostics.core.mc.McProtocol;
 import com.seekehr.netdiagnostics.core.monitor.PingMonitor;
 import com.seekehr.netdiagnostics.core.monitor.Traceroute;
@@ -23,6 +24,8 @@ public final class GuiMonitor extends GuiBase {
     private static final int B_TAB_ROUTE = 10, B_TAB_TRACE = 11;
     private static final int TILE_H = 22;
     private static final int ROW_H = 10;
+    /** A 0 ms tab-list ping is never real: not reported yet, or faked by the server/proxy. Ignored in comparisons. */
+    private static final String TAB_ZERO = "0 ms (not reported or faked, ignored)";
 
     private static boolean traceTab;
 
@@ -265,7 +268,7 @@ public final class GuiMonitor extends GuiBase {
             if (v.ok()) {
                 max = Math.max(max, v.pingMs);
             }
-            if (v.tabPingMs >= 0) {
+            if (v.tabPingMs > 0) {
                 max = Math.max(max, v.tabPingMs);
             }
         }
@@ -370,7 +373,7 @@ public final class GuiMonitor extends GuiBase {
             int prev = -1;
             for (int i = 0; i < count; i++) {
                 int tab = vis.get(i).tabPingMs;
-                if (tab < 0) {
+                if (tab <= 0) {
                     prev = -1;
                     continue;
                 }
@@ -406,8 +409,10 @@ public final class GuiMonitor extends GuiBase {
             if (!Double.isNaN(v.connectMs)) {
                 tip.add("TCP connect: " + String.format(Locale.ROOT, "%.2f ms", v.connectMs));
             }
-            if (v.tabPingMs >= 0) {
+            if (v.tabPingMs > 0) {
                 tip.add("Tab-list ping: " + v.tabPingMs + " ms");
+            } else if (v.tabPingMs == 0) {
+                tip.add("Tab-list ping: " + TAB_ZERO);
             }
             if (v.error != null) {
                 tip.addAll(fontRendererObj.listFormattedStringToWidth(v.error, 200));
@@ -456,6 +461,10 @@ public final class GuiMonitor extends GuiBase {
                     + String.format(Locale.ROOT, " in %.0f ms", m.dns.lookupMs) : "failed"});
         }
         rows.add(new String[]{"Pinging", m.address == null ? "..." : m.address + ":" + m.connectPort});
+        AsnLookup.Info server = AsnLookup.get(m.address);
+        if (server != null) {
+            rows.add(new String[]{"Network", ownerText(server)});
+        }
         boolean game = NetDiag.isGameServer(m);
         if (game) {
             NetDiag.GameSocket g = NetDiag.gameSocket();
@@ -471,8 +480,8 @@ public final class GuiMonitor extends GuiBase {
                 ? "local proxy (ExitLag/VPN) intercepts" : "direct to server"});
         if (game) {
             int tab = NetDiag.tabPing();
-            String v = tab < 0 ? "-" : tab + " ms";
-            if (tab >= 0 && !s.ping.isEmpty()) {
+            String v = tab < 0 ? "-" : tab == 0 ? TAB_ZERO : tab + " ms";
+            if (tab > 0 && !s.ping.isEmpty()) {
                 v += String.format(Locale.ROOT, " (probe median %s, diff %+.0f)", ms(s.ping.median), tab - s.ping.median);
             }
             rows.add(new String[]{"Tab ping", v});
@@ -493,7 +502,8 @@ public final class GuiMonitor extends GuiBase {
                 break;
             }
             String[] r = rows.get(i);
-            int color = "Path".equals(r[0]) && r[1].startsWith("local") ? Theme.ACCENT : Theme.TEXT;
+            int color = "Path".equals(r[0]) && r[1].startsWith("local") ? Theme.ACCENT
+                    : TAB_ZERO.equals(r[1]) ? Theme.WARN : Theme.TEXT;
             Draw.textClipped(fontRendererObj, r[0], x, ry, labelW - 4, Theme.TEXT_FAINT);
             Draw.textClipped(fontRendererObj, r[1], x + labelW, ry, w - labelW, color);
             if (mx >= x && mx < x + w && my >= ry - 1 && my < ry + ROW_H
@@ -521,13 +531,33 @@ public final class GuiMonitor extends GuiBase {
         List<Traceroute.Hop> hops = tr.hops();
         int fit = Math.max(1, (y + h - ry) / ROW_H);
         scroll = Math.max(0, Math.min(scroll, hops.size() - fit));
+        int addrW = Math.min(w - 60, fontRendererObj.getStringWidth("255.255.255.255") + 6);
+        int ownerW = w - 18 - addrW - 40;
+        // owner (AS) of the last replying hop above the first visible row, to spot where the network changes
+        String prevAsn = null;
+        for (int i = 0; i < scroll && i < hops.size(); i++) {
+            AsnLookup.Info a = AsnLookup.get(hops.get(i).address);
+            if (a != null && a.asn != null) {
+                prevAsn = a.asn;
+            }
+        }
         for (int i = scroll; i < hops.size() && i < scroll + fit; i++) {
             Traceroute.Hop hop = hops.get(i);
             int yy = ry + (i - scroll) * ROW_H;
             double best = hop.best();
+            AsnLookup.Info owner = AsnLookup.get(hop.address);
             Draw.textRight(fontRendererObj, String.valueOf(hop.number), x + 12, yy, Theme.TEXT_FAINT);
-            Draw.textClipped(fontRendererObj, hop.address == null ? "* no reply" : hop.address, x + 18, yy, w - 60,
+            Draw.textClipped(fontRendererObj, hop.address == null ? "* no reply" : hop.address, x + 18, yy, addrW - 4,
                     hop.address == null ? Theme.TEXT_FAINT : Theme.TEXT);
+            if (owner != null && ownerW > 20) {
+                // highlight the first hop of each new network: that is where an operator boundary is crossed
+                boolean changed = owner.asn != null && !owner.asn.equals(prevAsn);
+                Draw.textClipped(fontRendererObj, owner.label, x + 18 + addrW, yy, ownerW,
+                        changed ? Theme.ACCENT : Theme.TEXT_FAINT);
+            }
+            if (owner != null && owner.asn != null) {
+                prevAsn = owner.asn;
+            }
             Draw.textRight(fontRendererObj, Double.isNaN(best) ? "*" : ms(best) + " ms", x + w, yy,
                     Theme.latencyColor(best));
             if (mx >= x && mx < x + w && my >= yy - 1 && my < yy + ROW_H - 1) {
@@ -535,7 +565,12 @@ public final class GuiMonitor extends GuiBase {
                 for (double r : hop.rtts) {
                     sb.append(Double.isNaN(r) ? "  *" : "  " + ms(r) + " ms");
                 }
-                hover.add(new String[]{sb.toString()});
+                List<String> tip = new ArrayList<String>();
+                tip.add(sb.toString());
+                if (owner != null) {
+                    tip.addAll(ownerLines(owner));
+                }
+                hover.add(tip.toArray(new String[0]));
             }
         }
         if (hops.isEmpty() && tr.running()) {
@@ -566,6 +601,10 @@ public final class GuiMonitor extends GuiBase {
             sb.append(" via SRV ").append(m.srvRecord);
         }
         sb.append('\n');
+        AsnLookup.Info server = AsnLookup.get(m.address);
+        if (server != null) {
+            sb.append("Server network: ").append(ownerText(server)).append('\n');
+        }
         sb.append(String.format(Locale.ROOT, "Samples %d over %ds, every %s%n", s.samples.size(),
                 s.samples.isEmpty() ? 0 : (s.last().time - s.samples.get(0).time) / 1000, fmtInterval(m.intervalMs)));
         if (!p.isEmpty()) {
@@ -582,18 +621,48 @@ public final class GuiMonitor extends GuiBase {
             sb.append("Probe adapter: ").append(m.probeInterface == null ? "?" : m.probeInterface).append('\n');
         }
         if (NetDiag.isGameServer(m) && NetDiag.tabPing() >= 0) {
-            sb.append("Tab-list ping: ").append(NetDiag.tabPing()).append(" ms\n");
+            int tab = NetDiag.tabPing();
+            sb.append("Tab-list ping: ").append(tab == 0 ? TAB_ZERO : tab + " ms").append('\n');
         }
         Traceroute tr = NetDiag.traceroute();
         if (tr != null && !tr.hops().isEmpty()) {
             sb.append("Traceroute to ").append(tr.destination).append(":\n");
             for (Traceroute.Hop h : tr.hops()) {
                 double b = h.best();
-                sb.append(String.format(Locale.ROOT, "%3d  %-40s %s%n", h.number,
-                        h.address == null ? "*" : h.address, Double.isNaN(b) ? "*" : ms(b) + " ms"));
+                AsnLookup.Info o = AsnLookup.get(h.address);
+                sb.append(String.format(Locale.ROOT, "%3d  %-40s %-8s %s%n", h.number,
+                        h.address == null ? "*" : h.address, Double.isNaN(b) ? "*" : ms(b) + " ms",
+                        o == null ? "" : ownerText(o)));
             }
         }
         return sb.toString();
+    }
+
+    /** One line: "AS13335 CLOUDFLARENET - Cloudflare, Inc., US (104.16.0.0/13)" or the status text. */
+    private static String ownerText(AsnLookup.Info o) {
+        if (AsnLookup.pending(o)) {
+            return "looking up...";
+        }
+        if (o.asn == null) {
+            return o.name;
+        }
+        return o.asn + (o.name == null ? "" : " " + o.name) + (o.prefix == null ? "" : " (" + o.prefix + ")");
+    }
+
+    private List<String> ownerLines(AsnLookup.Info o) {
+        List<String> out = new ArrayList<String>();
+        if (AsnLookup.pending(o)) {
+            out.add("Owner: looking up...");
+        } else if (o.asn == null) {
+            out.add("Owner: " + o.name);
+        } else {
+            out.addAll(fontRendererObj.listFormattedStringToWidth("Owner: " + o.asn
+                    + (o.name == null ? "" : " " + o.name), 220));
+            if (o.prefix != null) {
+                out.add("Prefix: " + o.prefix + (o.country == null ? "" : "  (" + o.country + ")"));
+            }
+        }
+        return out;
     }
 
     private static String ms(double v) {
