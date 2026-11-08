@@ -1,0 +1,63 @@
+// SeekerNetDiagnostics - Forge 1.8.9 (11.15.1.2318) client-side mod.
+// Legacy toolchain: ForgeGradle 2.1-SNAPSHOT + Gradle 2.7 (wrapper) + JDK 8.
+buildscript {
+    repositories {
+        mavenCentral()
+        maven {
+            name = "forge"
+            url = "https://maven.minecraftforge.net/"
+        }
+    }
+    dependencies {
+        classpath 'net.minecraftforge.gradle:ForgeGradle:2.1-SNAPSHOT'
+    }
+}
+
+apply plugin: 'net.minecraftforge.gradle.forge'
+
+version = "1.0.0"
+group = "com.seekehr.netdiagnostics"
+archivesBaseName = "SeekerNetDiagnostics-1.8.9"
+
+sourceCompatibility = 1.8
+targetCompatibility = 1.8
+compileJava.options.encoding = 'UTF-8'
+compileTestJava.options.encoding = 'UTF-8'
+
+minecraft {
+    version = "1.8.9-11.15.1.2318-1.8.9"
+    runDir = "run"
+    mappings = "stable_20"
+    makeObfSourceJar = false
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // No runtime dependencies are bundled: the mod uses only the JDK and
+    // libraries already shipped with Minecraft/Forge 1.8.9 (Netty, LWJGL).
+    // JUnit 4.13.2 is the release that fixes CVE-2020-15250; test scope only.
+    testCompile 'junit:junit:4.13.2'
+}
+
+test {
+    testLogging {
+        events "passed", "skipped", "failed"
+        exceptionFormat "full"
+    }
+}
+
+processResources {
+    inputs.property "version", project.version
+    inputs.property "mcversion", project.minecraft.version
+
+    from(sourceSets.main.resources.srcDirs) {
+        include 'mcmod.info'
+        expand 'version': project.version, 'mcversion': project.minecraft.version
+    }
+    from(sourceSets.main.resources.srcDirs) {
+        exclude 'mcmod.info'
+    }
+}
