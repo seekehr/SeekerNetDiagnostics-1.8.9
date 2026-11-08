@@ -20,31 +20,30 @@ import net.minecraft.util.BlockPos;
 
 import java.io.File;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 
 /**
- * {@code /ns}: command-line access to every diagnostic. Registered with Forge's
+ * {@code /snd} (aliases {@code /seekernetdiag}, {@code /seekernetdiagnostics}): command-line access to every diagnostic. Registered with Forge's
  * ClientCommandHandler, so it is executed locally and never sent to the server.
  */
-public final class CommandNs extends CommandBase {
+public final class CommandSnd extends CommandBase {
     private static final String[] SUBS = {"test", "tcp", "monitor", "compare", "export", "settings", "cancel",
             "history", "help"};
 
     @Override
     public String getCommandName() {
-        return "ns";
+        return "snd";
     }
 
     @Override
     public List<String> getCommandAliases() {
-        return Collections.singletonList("netscope");
+        return Arrays.asList("seekernetdiag", "seekernetdiagnostics");
     }
 
     @Override
     public String getCommandUsage(ICommandSender sender) {
-        return "/ns [test|tcp|monitor|compare|export|settings|cancel|history|help]";
+        return "/snd [test|tcp|monitor|compare|export|settings|cancel|history|help]";
     }
 
     @Override
@@ -130,13 +129,13 @@ public final class CommandNs extends CommandBase {
 
     private static void help() {
         Chat.info("SeekerNetDiagnostics commands (all run locally):");
-        Chat.info("/ns or /snm - open the dashboard");
-        Chat.info("/ns test <host> [port] [quick|detailed] - TCP handshake samples + Minecraft status ping");
-        Chat.info("/ns tcp <host> <port> - TCP handshake samples to one explicit port");
-        Chat.info("/ns monitor [on|off|status|clear] - live connection monitor");
-        Chat.info("/ns compare [status] - compare ExitLag routes");
-        Chat.info("/ns export - write JSON/CSV reports to config/netscope/reports/");
-        Chat.info("/ns settings | /ns cancel | /ns history");
+        Chat.info("/snd (or /seekernetdiag, /seekernetdiagnostics) - open the dashboard");
+        Chat.info("/snd test <host> [port] [quick|detailed] - TCP handshake samples + Minecraft status ping");
+        Chat.info("/snd tcp <host> <port> - TCP handshake samples to one explicit port");
+        Chat.info("/snd monitor [on|off|status|clear] - live connection monitor");
+        Chat.info("/snd compare [status] - compare ExitLag routes");
+        Chat.info("/snd export - write JSON/CSV reports to config/netscope/reports/");
+        Chat.info("/snd settings | /snd cancel | /snd history");
     }
 
     private static void test(NetDiag nd, String[] args, TestRun.Kind kind) {
@@ -145,11 +144,11 @@ public final class CommandNs extends CommandBase {
                 ClientEvents.openNextTick(new GuiTestTarget(null, "", "", false));
                 return;
             }
-            throw new IllegalArgumentException("Usage: /ns tcp <host> <port>");
+            throw new IllegalArgumentException("Usage: /snd tcp <host> <port>");
         }
         String port = args.length >= 3 && !isMode(args[2]) ? args[2] : null;
         if (kind == TestRun.Kind.TCP && port == null && args[1].indexOf(':') < 0) {
-            throw new IllegalArgumentException("Usage: /ns tcp <host> <port> (the port must be given explicitly)");
+            throw new IllegalArgumentException("Usage: /snd tcp <host> <port> (the port must be given explicitly)");
         }
         boolean detailed = false;
         for (int i = 2; i < args.length; i++) {
@@ -162,7 +161,7 @@ public final class CommandNs extends CommandBase {
         TestRun run = nd.startTest(kind, t, samples, null, null, true);
         Chat.info("Testing " + t.display() + " (" + kind.label + ", " + samples + " samples, one every "
                 + nd.settings().intervalMs + " ms) from this Minecraft process. Results will appear here; "
-                + "/ns cancel to stop.");
+                + "/snd cancel to stop.");
         if (run == null) {
             Chat.error("Could not start the test.");
         }
@@ -208,7 +207,7 @@ public final class CommandNs extends CommandBase {
     private static void compareStatus(NetDiag nd) {
         CompareSession c = nd.compareSession();
         if (c == null || c.profiles().isEmpty()) {
-            Chat.info("No route comparison in progress. Use /ns compare to start one.");
+            Chat.info("No route comparison in progress. Use /snd compare to start one.");
             return;
         }
         List<CompareSession.Profile> ps = c.profiles();

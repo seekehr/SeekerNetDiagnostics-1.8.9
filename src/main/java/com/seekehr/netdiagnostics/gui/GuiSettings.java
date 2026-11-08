@@ -9,7 +9,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
-/** /ns settings: every option with safe bounds. Changes apply when Save is pressed. */
+/** /snd settings: every option with safe bounds. Changes apply when Save is pressed. */
 public final class GuiSettings extends GuiBase {
     private static final int ID_SAVE = 1;
     private static final int ID_DEFAULTS = 2;

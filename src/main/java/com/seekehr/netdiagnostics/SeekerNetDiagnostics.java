@@ -2,8 +2,7 @@ package com.seekehr.netdiagnostics;
 
 import com.seekehr.netdiagnostics.mod.ClientEvents;
 import com.seekehr.netdiagnostics.mod.NetDiag;
-import com.seekehr.netdiagnostics.mod.commands.CommandNs;
-import com.seekehr.netdiagnostics.mod.commands.CommandSnm;
+import com.seekehr.netdiagnostics.mod.commands.CommandSnd;
 import net.minecraftforge.client.ClientCommandHandler;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.fml.common.FMLCommonHandler;
@@ -42,8 +41,7 @@ public class SeekerNetDiagnostics {
         ClientEvents events = new ClientEvents();
         MinecraftForge.EVENT_BUS.register(events);
         FMLCommonHandler.instance().bus().register(events);
-        ClientCommandHandler.instance.registerCommand(new CommandSnm());
-        ClientCommandHandler.instance.registerCommand(new CommandNs());
+        ClientCommandHandler.instance.registerCommand(new CommandSnd());
         Runtime.getRuntime().addShutdownHook(new Thread(new Runnable() {
             @Override
             public void run() {

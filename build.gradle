@@ -49,6 +49,86 @@ test {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Workaround for a legacy ForgeGradle 2.1 bug: getAssets downloads from
+// http://resources.download.minecraft.net, which Mojang now rejects with HTTP 400.
+// This task fetches the same objects over HTTPS into ForgeGradle's asset cache first and verifies
+// each file's SHA-1 against Mojang's asset index; ForgeGradle then skips every file already present.
+// Only affects dev tasks that need assets (setupDecompWorkspace, runClient), not the mod JAR.
+// ---------------------------------------------------------------------------------------------
+task fetchAssetsHttps {
+    description = 'Downloads Minecraft assets over HTTPS (works around ForgeGradle 2.1 using plain HTTP).'
+    doLast {
+        def assetsDir = new File(gradle.gradleUserHomeDir, 'caches/minecraft/assets')
+        def indexes = new File(assetsDir, 'indexes').listFiles({ f -> f.name.endsWith('.json') } as FileFilter)
+        if (!indexes) {
+            logger.warn('fetchAssetsHttps: no asset index found yet; nothing to do')
+            return
+        }
+        def objectsDir = new File(assetsDir, 'objects')
+        def todo = [:]
+        indexes.each { idx ->
+            new groovy.json.JsonSlurper().parse(idx).objects.each { name, obj -> todo[obj.hash] = obj.size as long }
+        }
+        def sha1 = { File f ->
+            def md = java.security.MessageDigest.getInstance('SHA-1')
+            f.withInputStream { is ->
+                byte[] buf = new byte[65536]
+                int n
+                while ((n = is.read(buf)) > 0) { md.update(buf, 0, n) }
+            }
+            md.digest().collect { String.format('%02x', it & 0xff) }.join()
+        }
+        def missing = todo.findAll { hash, size ->
+            def f = new File(objectsDir, "${hash.substring(0, 2)}/${hash}")
+            !(f.isFile() && f.length() == size && sha1(f) == hash)
+        }
+        logger.lifecycle("fetchAssetsHttps: ${todo.size()} assets indexed, ${missing.size()} to download")
+        if (missing.isEmpty()) {
+            return
+        }
+        def pool = java.util.concurrent.Executors.newFixedThreadPool(8)
+        def failures = Collections.synchronizedList([])
+        def done = new java.util.concurrent.atomic.AtomicInteger()
+        missing.each { hash, size ->
+            pool.submit({
+                def rel = "${hash.substring(0, 2)}/${hash}"
+                def dest = new File(objectsDir, rel)
+                def tmp = new File(objectsDir, rel + '.part')
+                try {
+                    dest.parentFile.mkdirs()
+                    def conn = new URL("https://resources.download.minecraft.net/${rel}").openConnection()
+                    conn.connectTimeout = 15000
+                    conn.readTimeout = 30000
+                    conn.inputStream.withStream { is -> tmp.withOutputStream { os -> os << is } }
+                    if (tmp.length() != size || sha1(tmp) != hash) {
+                        throw new IOException("checksum mismatch")
+                    }
+                    if (dest.exists()) { dest.delete() }
+                    if (!tmp.renameTo(dest)) { throw new IOException("cannot move ${tmp} to ${dest}") }
+                    int d = done.incrementAndGet()
+                    if (d % 200 == 0) { logger.lifecycle("fetchAssetsHttps: ${d}/${missing.size()}") }
+                } catch (Exception e) {
+                    tmp.delete()
+                    failures << "${rel}: ${e.message}"
+                }
+            } as Runnable)
+        }
+        pool.shutdown()
+        pool.awaitTermination(1, java.util.concurrent.TimeUnit.HOURS)
+        if (!failures.isEmpty()) {
+            failures.take(10).each { logger.error("fetchAssetsHttps failed: ${it}") }
+            throw new GradleException("fetchAssetsHttps: ${failures.size()} asset(s) failed to download")
+        }
+        logger.lifecycle("fetchAssetsHttps: downloaded ${done.get()} assets")
+    }
+}
+
+afterEvaluate {
+    fetchAssetsHttps.dependsOn 'getAssetIndex'
+    tasks.getByName('getAssets').dependsOn fetchAssetsHttps
+}
+
 processResources {
     inputs.property "version", project.version
     inputs.property "mcversion", project.minecraft.version

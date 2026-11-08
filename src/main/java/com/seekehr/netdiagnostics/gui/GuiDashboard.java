@@ -24,7 +24,7 @@ import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 
-/** Main dashboard opened by /seekernetmod, /snm and /ns. */
+/** Main dashboard opened by /snd, /seekernetdiag and /seekernetdiagnostics. */
 public final class GuiDashboard extends GuiBase {
     private static final int ID_TEST_MINE = 1;
     private static final int ID_TEST_IP = 2;
