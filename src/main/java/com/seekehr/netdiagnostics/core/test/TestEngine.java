@@ -2,11 +2,9 @@ package com.seekehr.netdiagnostics.core.test;
 
 import com.seekehr.netdiagnostics.core.config.Settings;
 import com.seekehr.netdiagnostics.core.dns.DnsInfo;
-import com.seekehr.netdiagnostics.core.dns.DnsMessage;
 import com.seekehr.netdiagnostics.core.dns.DnsResolver;
 import com.seekehr.netdiagnostics.core.mc.McStatusClient;
 import com.seekehr.netdiagnostics.core.net.ProbeOutcome;
-import com.seekehr.netdiagnostics.core.net.TcpProbe;
 
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -22,22 +20,22 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Runs diagnostic jobs on a single daemon worker thread (bounded queue), so at most one connection
- * attempt is in flight at any time. A per-destination limiter enforces at least
- * {@link Settings#MIN_INTERVAL_MS} between attempts to the same IP and port across all jobs.
+ * Runs tests on a single daemon worker thread with a bounded queue, so at most one connection is
+ * open at a time. A per-destination limiter enforces at least {@link Settings#MIN_INTERVAL_MS}
+ * between connections to the same IP and port across all tests.
  */
 public final class TestEngine {
     public static final int MAX_QUEUED_JOBS = 4;
 
     public interface Listener {
-        /** Called on the worker thread whenever a run changes (attempt added, phase change, finished). */
+        /** Called on the worker thread whenever a run changes (sample added, phase change, finished). */
         void onUpdate(TestRun run);
     }
 
     private final ThreadPoolExecutor executor;
     private final List<Listener> listeners = new CopyOnWriteArrayList<Listener>();
     private final List<TestRun> active = new CopyOnWriteArrayList<TestRun>();
-    private final Map<String, Long> lastAttemptNanos = new HashMap<String, Long>();
+    private final Map<String, Long> lastConnectNanos = new HashMap<String, Long>();
     private volatile boolean shutdown;
 
     public TestEngine() {
@@ -58,22 +56,11 @@ public final class TestEngine {
         listeners.add(l);
     }
 
-    public void removeListener(Listener l) {
-        listeners.remove(l);
-    }
-
     public List<TestRun> activeRuns() {
         return new ArrayList<TestRun>(active);
     }
 
-    public boolean busy() {
-        return !active.isEmpty();
-    }
-
-    /**
-     * Queue a run. Throws IllegalStateException with a user-facing message when the queue is full or
-     * the engine is shutting down.
-     */
+    /** Queue a run. Throws IllegalStateException with a user-facing message when it cannot be queued. */
     public TestRun submit(final TestRun run, final Settings settings) {
         if (shutdown) {
             throw new IllegalStateException("Diagnostics are shutting down.");
@@ -141,16 +128,14 @@ public final class TestEngine {
         run.phase = "Resolving " + run.target.host;
         fire(run);
 
-        DnsResolver resolver = new DnsResolver(Math.min(2000, run.tcpTimeoutMs));
         String connectHost = run.target.host;
         int connectPort = run.target.port;
         String srvNote = null;
-        if (run.kind == TestRun.Kind.FULL && !run.target.portExplicit && !DnsResolver.isIpLiteral(connectHost)) {
-            DnsMessage.Record srv = resolver.lookupMinecraftSrv(connectHost);
-            if (srv != null && srv.data != null && !srv.data.isEmpty() && srv.port > 0) {
-                srvNote = "_minecraft._tcp." + run.target.host + " SRV → " + srv.data + ":" + srv.port
-                        + (srv.ttl >= 0 ? " (TTL " + srv.ttl + "s)" : "");
-                connectHost = srv.data.endsWith(".") ? srv.data.substring(0, srv.data.length() - 1) : srv.data;
+        if (!run.target.portExplicit && !DnsResolver.isIpLiteral(connectHost)) {
+            DnsResolver.Srv srv = DnsResolver.lookupMinecraftSrv(connectHost);
+            if (srv != null) {
+                srvNote = "_minecraft._tcp." + run.target.host + " → " + srv.target + ":" + srv.port;
+                connectHost = srv.target;
                 connectPort = srv.port;
             }
         }
@@ -160,13 +145,13 @@ public final class TestEngine {
             return;
         }
 
-        DnsInfo dns = resolver.resolve(connectHost, settings.preferIpv4);
+        DnsInfo dns = DnsResolver.resolve(connectHost, settings.preferIpv4);
         dns.srvRecord = srvNote;
         run.dns = dns;
         if (!dns.resolved()) {
             run.error = dns.error != null ? dns.error : "DNS resolution failed";
             run.addAttempt(new TestRun.Attempt(0, false, System.currentTimeMillis(), ProbeOutcome.DNS_FAILURE,
-                    Double.NaN, dns.systemLookupMs, null, 0, null, connectPort, run.error));
+                    Double.NaN, Double.NaN, Double.NaN, run.error));
             run.state = TestRun.State.FAILED;
             run.phase = "DNS resolution failed";
             run.finishedAt = System.currentTimeMillis();
@@ -191,34 +176,26 @@ public final class TestEngine {
             }
             boolean warm = i < run.warmupRequested;
             int index = warm ? -(run.warmupRequested - i) : i - run.warmupRequested + 1;
-            run.phase = warm ? "Warm-up connection" : "TCP handshake " + index + " of " + run.samplesRequested;
+            run.phase = warm ? "Warm-up ping" : "Ping " + index + " of " + run.samplesRequested;
             if (!waitForSlot(remote, run.intervalMs, run)) {
                 return;
             }
-            TcpProbe.Result r = TcpProbe.probe(remote, run.tcpTimeoutMs, run.cancelFlag);
-            markAttempt(remote);
-            if (r.outcome == ProbeOutcome.CANCELLED) {
+            // The handshake carries the host name the client connects with, like the vanilla server list.
+            McStatusClient.Result r = McStatusClient.ping(remote, connectHost, run.timeoutMs,
+                    McStatusClient.DEFAULT_MAX_RESPONSE_BYTES, run.cancelFlag);
+            markConnect(remote);
+            ProbeOutcome outcome = r.outcome();
+            if (outcome == ProbeOutcome.CANCELLED) {
                 cancelled(run);
                 return;
             }
-            run.addAttempt(new TestRun.Attempt(index, warm, System.currentTimeMillis(), r.outcome, r.rttMs,
-                    r.elapsedMs, r.localAddress, r.localPort, r.remoteAddress, r.remotePort, r.detail));
-            fire(run);
-        }
-
-        if (run.kind == TestRun.Kind.FULL) {
-            if (cancelled(run)) {
-                return;
+            if (r.status != null) {
+                run.serverInfo = r.status;
+                run.protocolNote = r.protocolNote;
             }
-            run.phase = "Minecraft status ping";
+            run.addAttempt(new TestRun.Attempt(index, warm, System.currentTimeMillis(), outcome, r.pingPongMs,
+                    r.tcpConnectMs, r.statusResponseMs, outcome == ProbeOutcome.SUCCESS ? null : r.error));
             fire(run);
-            if (!waitForSlot(remote, run.intervalMs, run)) {
-                return;
-            }
-            McStatusClient.Result st = McStatusClient.ping(remote, connectHost, run.statusTimeoutMs,
-                    McStatusClient.DEFAULT_MAX_RESPONSE_BYTES, run.cancelFlag);
-            markAttempt(remote);
-            run.mcStatus = st;
         }
         run.phase = "Finished";
         run.state = TestRun.State.DONE;
@@ -239,11 +216,11 @@ public final class TestEngine {
         return a.getAddress().getHostAddress() + "|" + a.getPort();
     }
 
-    private void markAttempt(InetSocketAddress remote) {
-        synchronized (lastAttemptNanos) {
-            lastAttemptNanos.put(key(remote), System.nanoTime());
-            if (lastAttemptNanos.size() > 256) {
-                lastAttemptNanos.clear();
+    private void markConnect(InetSocketAddress remote) {
+        synchronized (lastConnectNanos) {
+            lastConnectNanos.put(key(remote), System.nanoTime());
+            if (lastConnectNanos.size() > 256) {
+                lastConnectNanos.clear();
             }
         }
     }
@@ -253,8 +230,8 @@ public final class TestEngine {
         long minGap = Math.max(Settings.MIN_INTERVAL_MS, intervalMs) * 1_000_000L;
         while (true) {
             Long last;
-            synchronized (lastAttemptNanos) {
-                last = lastAttemptNanos.get(key(remote));
+            synchronized (lastConnectNanos) {
+                last = lastConnectNanos.get(key(remote));
             }
             long wait = last == null ? 0 : (last + minGap) - System.nanoTime();
             if (wait <= 0) {

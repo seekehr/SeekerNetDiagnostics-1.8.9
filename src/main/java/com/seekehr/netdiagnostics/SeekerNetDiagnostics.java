@@ -5,7 +5,6 @@ import com.seekehr.netdiagnostics.mod.NetDiag;
 import com.seekehr.netdiagnostics.mod.commands.CommandSnd;
 import net.minecraftforge.client.ClientCommandHandler;
 import net.minecraftforge.common.MinecraftForge;
-import net.minecraftforge.fml.common.FMLCommonHandler;
 import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.common.event.FMLInitializationEvent;
 import net.minecraftforge.fml.common.event.FMLPreInitializationEvent;
@@ -35,12 +34,7 @@ public class SeekerNetDiagnostics {
     @Mod.EventHandler
     public void init(FMLInitializationEvent event) {
         final NetDiag nd = NetDiag.init(configDir != null ? configDir : new File("config"));
-        if (nd.settingsStore.monitorOnStartup) {
-            nd.monitor.start(System.currentTimeMillis());
-        }
-        ClientEvents events = new ClientEvents();
-        MinecraftForge.EVENT_BUS.register(events);
-        FMLCommonHandler.instance().bus().register(events);
+        MinecraftForge.EVENT_BUS.register(new ClientEvents());
         ClientCommandHandler.instance.registerCommand(new CommandSnd());
         Runtime.getRuntime().addShutdownHook(new Thread(new Runnable() {
             @Override

@@ -39,11 +39,11 @@ public final class Chat {
     }
 
     public static void runResult(TestRun run) {
-        String head = run.kind.label + " test of " + run.target.display();
+        String head = "Ping test of " + run.target.display();
         if (run.state == TestRun.State.CANCELLED) {
             warn(head + " was cancelled.");
         } else if (run.summary().isEmpty()) {
-            error(head + " finished without a successful TCP handshake.");
+            error(head + " finished without a successful ping.");
         } else {
             good(head + " finished.");
         }

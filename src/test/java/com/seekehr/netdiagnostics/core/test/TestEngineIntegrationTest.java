@@ -16,6 +16,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -28,8 +29,6 @@ public class TestEngineIntegrationTest {
     public void setUp() {
         engine = new TestEngine();
         settings = new Settings();
-        settings.intervalMs = 500;
-        settings.warmupSamples = 1;
     }
 
     @After
@@ -37,13 +36,12 @@ public class TestEngineIntegrationTest {
         engine.shutdown();
     }
 
-    private TestRun runAndWait(TestRun run, long timeoutMs) throws InterruptedException {
+    private TestRun runAndWait(final TestRun run, long timeoutMs) throws InterruptedException {
         final CountDownLatch done = new CountDownLatch(1);
-        final TestRun target = run;
         engine.addListener(new TestEngine.Listener() {
             @Override
             public void onUpdate(TestRun r) {
-                if (r == target && r.finished() && r.finishedAt > 0) {
+                if (r == run && r.finished() && r.finishedAt > 0) {
                     done.countDown();
                 }
             }
@@ -53,50 +51,86 @@ public class TestEngineIntegrationTest {
         return run;
     }
 
+    private static TestRun run(int port, int samples, int warmup, int timeout) {
+        return new TestRun(new Target("127.0.0.1", port, true), samples, warmup, 500, timeout, null, null);
+    }
+
     @Test
-    public void fullTestAgainstMockServer() throws Exception {
+    public void pingsMockServerRepeatedly() throws Exception {
         MockStatusServer s = new MockStatusServer(MockStatusServer.Mode.NORMAL);
         try {
-            TestRun run = new TestRun(TestRun.Kind.FULL, new Target("127.0.0.1", s.port(), true), 3, 1, 500, 2000,
-                    3000, null, null);
-            runAndWait(run, 15_000);
-            assertEquals(TestRun.State.DONE, run.state);
-            assertEquals(3, run.summary().count);
-            assertEquals(3, run.measuredAttempts());
-            assertEquals(0, run.failedAttempts());
-            List<TestRun.Attempt> atts = run.attempts();
-            assertEquals(4, atts.size()); // 1 warm-up + 3
+            TestRun r = runAndWait(run(s.port(), 3, 1, 3000), 15_000);
+            assertEquals(TestRun.State.DONE, r.state);
+            assertEquals(3, r.summary().count);
+            assertEquals(0, r.failedAttempts());
+            assertEquals(4, s.connections.get()); // one connection per sample, warm-up included
+            List<TestRun.Attempt> atts = r.attempts();
             assertTrue(atts.get(0).warmup);
-            // rate limiting: consecutive attempts to the same destination >= 500 ms apart
+            for (TestRun.Attempt a : atts) {
+                assertFalse(Double.isNaN(a.pingMs));
+                assertFalse(Double.isNaN(a.connectMs));
+                assertFalse(Double.isNaN(a.statusMs));
+            }
             for (int i = 1; i < atts.size(); i++) {
                 long gap = atts.get(i).timestamp - atts.get(i - 1).timestamp;
-                assertTrue("gap " + gap, gap >= 480);
+                assertTrue("gap " + gap, gap >= 480); // rate limit between connections
             }
-            assertNotNull(run.mcStatus);
-            assertTrue(run.mcStatus.statusOk);
-            assertTrue(run.mcStatus.pingOk);
-            assertEquals("127.0.0.1", run.resolvedAddress);
-            String text = Conclusions.describe(run).get(0);
-            assertTrue(text, text.startsWith("Your connection to the selected TCP endpoint (127.0.0.1:" + s.port()));
-            assertTrue(Conclusions.clipboardSummary(run).contains(Conclusions.EXITLAG_NOT_VERIFIED));
+            assertNotNull(r.serverInfo);
+            assertEquals("MockServer 1.8.9", r.serverInfo.versionName);
+            assertFalse("loopback must not count as interception", r.localInterceptDetected());
+            String head = Conclusions.describe(r).get(0);
+            assertTrue(head, head.startsWith("Your Minecraft ping to 127.0.0.1:" + s.port() + " averaged"));
         } finally {
             s.close();
         }
     }
 
     @Test
-    public void refusedPortNeverProducesLatency() throws Exception {
-        settings.warmupSamples = 0;
+    public void refusedPortNeverProducesPing() throws Exception {
         int port = MockStatusServer.closedPort();
-        TestRun run = new TestRun(TestRun.Kind.TCP, new Target("127.0.0.1", port, true), 2, 0, 500, 5000, 3000,
-                null, null);
-        runAndWait(run, 30_000);
-        assertEquals(TestRun.State.DONE, run.state);
-        assertTrue(run.summary().isEmpty());
-        assertEquals(2, run.count(ProbeOutcome.REFUSED));
-        String text = Conclusions.describe(run).get(0);
-        assertTrue(text, text.contains("A valid TCP handshake latency cannot be measured"));
-        assertTrue(text, !text.contains(" ms"));
+        TestRun r = runAndWait(run(port, 2, 0, 5000), 30_000);
+        assertTrue(r.summary().isEmpty());
+        assertEquals(2, r.count(ProbeOutcome.REFUSED));
+        String head = Conclusions.describe(r).get(0);
+        assertTrue(head, head.contains("A valid ping cannot be measured"));
+        assertFalse(head, head.contains(" ms"));
+    }
+
+    @Test
+    public void statusWithoutPongIsReportedSeparately() throws Exception {
+        MockStatusServer s = new MockStatusServer(MockStatusServer.Mode.CLOSE_AFTER_STATUS);
+        try {
+            TestRun r = runAndWait(run(s.port(), 2, 0, 3000), 15_000);
+            assertTrue(r.summary().isEmpty());
+            assertEquals(2, r.count(ProbeOutcome.NO_PONG));
+            assertEquals(2, r.statusSummary().count);
+            assertTrue(Conclusions.describe(r).get(0).contains("never answered the ping"));
+        } finally {
+            s.close();
+        }
+    }
+
+    @Test
+    public void nonMinecraftServiceIsProtocolError() throws Exception {
+        MockStatusServer s = new MockStatusServer(MockStatusServer.Mode.GARBAGE);
+        try {
+            TestRun r = runAndWait(run(s.port(), 1, 0, 3000), 15_000);
+            assertEquals(1, r.count(ProbeOutcome.PROTOCOL_ERROR));
+            assertTrue(r.summary().isEmpty());
+        } finally {
+            s.close();
+        }
+    }
+
+    @Test
+    public void silentServerIsNoResponse() throws Exception {
+        MockStatusServer s = new MockStatusServer(MockStatusServer.Mode.SILENT);
+        try {
+            TestRun r = runAndWait(run(s.port(), 1, 0, 1000), 15_000);
+            assertEquals(1, r.count(ProbeOutcome.NO_RESPONSE));
+        } finally {
+            s.close();
+        }
     }
 
     @Test
@@ -108,36 +142,33 @@ public class TestEngineIntegrationTest {
         } catch (java.net.UnknownHostException expected) {
             // good: resolver behaves
         }
-        TestRun run = new TestRun(TestRun.Kind.TCP, new Target(host, 25565, true), 3, 0, 500, 1000, 1000, null, null);
-        runAndWait(run, 30_000);
-        assertEquals(TestRun.State.FAILED, run.state);
-        assertEquals(1, run.count(ProbeOutcome.DNS_FAILURE));
-        assertTrue(run.summary().isEmpty());
-        assertTrue(Conclusions.describe(run).get(0).startsWith("DNS resolution failed"));
+        TestRun r = runAndWait(new TestRun(new Target(host, 25565, true), 3, 0, 500, 1000, null, null), 30_000);
+        assertEquals(TestRun.State.FAILED, r.state);
+        assertEquals(1, r.count(ProbeOutcome.DNS_FAILURE));
+        assertTrue(Conclusions.describe(r).get(0).startsWith("DNS resolution failed"));
     }
 
     @Test
     public void cancellationStopsRun() throws Exception {
         MockStatusServer s = new MockStatusServer(MockStatusServer.Mode.NORMAL);
         try {
-            final TestRun run = new TestRun(TestRun.Kind.TCP, new Target("127.0.0.1", s.port(), true), 50, 0, 500,
-                    2000, 2000, null, null);
+            final TestRun r = run(s.port(), 50, 0, 2000);
             final CountDownLatch done = new CountDownLatch(1);
             engine.addListener(new TestEngine.Listener() {
                 @Override
-                public void onUpdate(TestRun r) {
-                    if (r == run && r.measuredAttempts() >= 2) {
-                        r.cancelFlag.set(true);
+                public void onUpdate(TestRun x) {
+                    if (x == r && x.measuredAttempts() >= 2) {
+                        x.cancelFlag.set(true);
                     }
-                    if (r == run && r.finished() && r.finishedAt > 0) {
+                    if (x == r && x.finished() && x.finishedAt > 0) {
                         done.countDown();
                     }
                 }
             });
-            engine.submit(run, settings);
+            engine.submit(r, settings);
             assertTrue(done.await(15, TimeUnit.SECONDS));
-            assertEquals(TestRun.State.CANCELLED, run.state);
-            assertTrue(run.measuredAttempts() < 50);
+            assertEquals(TestRun.State.CANCELLED, r.state);
+            assertTrue(r.measuredAttempts() < 50);
         } finally {
             s.close();
         }
@@ -150,8 +181,7 @@ public class TestEngineIntegrationTest {
             int accepted = 0;
             try {
                 for (int i = 0; i < TestEngine.MAX_QUEUED_JOBS + 3; i++) {
-                    engine.submit(new TestRun(TestRun.Kind.TCP, new Target("127.0.0.1", s.port(), true), 20, 0, 500,
-                            1000, 1000, null, null), settings);
+                    engine.submit(run(s.port(), 20, 0, 1000), settings);
                     accepted++;
                 }
                 fail("queue accepted unlimited jobs");

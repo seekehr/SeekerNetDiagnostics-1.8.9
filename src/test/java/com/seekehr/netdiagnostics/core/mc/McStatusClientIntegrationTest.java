@@ -30,6 +30,7 @@ public class McStatusClientIntegrationTest {
             assertTrue(r.pingOk);
             assertTrue(r.pingPongMs >= 0);
             assertEquals(McStatusClient.Stage.DONE, r.failedStage);
+            assertEquals(ProbeOutcome.SUCCESS, r.outcome());
             assertEquals("MockServer 1.8.9", r.status.versionName);
             assertEquals(47, r.status.protocol);
             assertEquals(3, r.status.onlinePlayers);
@@ -53,6 +54,7 @@ public class McStatusClientIntegrationTest {
             assertTrue(Double.isNaN(r.pingPongMs));
             assertEquals(McStatusClient.Stage.PING, r.failedStage);
             assertNotNull(r.error);
+            assertEquals(ProbeOutcome.NO_PONG, r.outcome());
         } finally {
             s.close();
         }
@@ -67,6 +69,7 @@ public class McStatusClientIntegrationTest {
             assertFalse(r.statusOk);
             assertTrue(Double.isNaN(r.statusResponseMs));
             assertEquals(McStatusClient.Stage.STATUS_REQUEST, r.failedStage);
+            assertEquals(ProbeOutcome.PROTOCOL_ERROR, r.outcome());
         } finally {
             s.close();
         }
@@ -94,6 +97,7 @@ public class McStatusClientIntegrationTest {
             assertEquals(ProbeOutcome.SUCCESS, r.tcpOutcome);
             assertFalse(r.statusOk);
             assertTrue(r.error, r.error.contains("within 1000 ms"));
+            assertEquals(ProbeOutcome.NO_RESPONSE, r.outcome());
             assertTrue("took " + took, took < 3000);
         } finally {
             s.close();
@@ -122,5 +126,6 @@ public class McStatusClientIntegrationTest {
         assertFalse(r.statusOk);
         assertTrue(Double.isNaN(r.tcpConnectMs));
         assertEquals(McStatusClient.Stage.TCP_CONNECT, r.failedStage);
+        assertEquals(ProbeOutcome.REFUSED, r.outcome());
     }
 }

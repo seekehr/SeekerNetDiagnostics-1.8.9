@@ -5,7 +5,7 @@ import java.util.Locale;
 import java.util.Random;
 
 /**
- * Compares two sets of successful TCP handshake samples (profile A = baseline, profile B = candidate).
+ * Compares two sets of successful Minecraft ping samples (profile A = baseline, profile B = candidate).
  *
  * <p>The difference in medians (B - A) is reported together with a 95% percentile-bootstrap
  * confidence interval (fixed seed, so results are reproducible). A route is only described as
@@ -106,15 +106,15 @@ public final class ProfileComparison {
             case INSUFFICIENT_DATA:
                 return String.format(Locale.ROOT,
                         "Not enough successful samples to compare (%s: %d, %s: %d). Collect at least %d successful "
-                                + "TCP handshakes per profile, ideally %d+, before drawing conclusions.",
+                                + "pings per profile, ideally %d+, before drawing conclusions.",
                         labelA, a.count, labelB, b.count, MIN_SAMPLES, SOLID_SAMPLES);
             case NO_MEANINGFUL_DIFFERENCE:
                 return String.format(Locale.ROOT,
-                        "%s and %s performed about the same: median RTT differed by only %.1f ms (%s for %s).",
+                        "%s and %s performed about the same: median ping differed by only %.1f ms (%s for %s).",
                         labelA, labelB, Math.abs(medianDiff), variability, labelB);
             case INCONCLUSIVE:
                 return String.format(Locale.ROOT,
-                        "No clear winner. %s's median RTT was %.1f ms %s than %s, but the results overlap "
+                        "No clear winner. %s's median ping was %.1f ms %s than %s, but the results overlap "
                                 + "(95%% interval for the difference: %.1f to %.1f ms). Repeat the test (ABBA order) "
                                 + "to reduce time-of-day effects.",
                         labelB, Math.abs(medianDiff), medianDiff < 0 ? "lower" : "higher", labelA, ciLow, ciHigh);
@@ -128,7 +128,7 @@ public final class ProfileComparison {
                         ? " Sample size is still small; confirm with another ABBA round." : "";
                 String var = bFaster ? variability : invert(variability);
                 return String.format(Locale.ROOT,
-                        "%s showed a %.1f ms lower median RTT over %d successful TCP connections, with %s.%s",
+                        "%s showed a %.1f ms lower median ping over %d successful pings, with %s.%s",
                         winner, Math.abs(medianDiff), w.count, var, caution);
             }
         }

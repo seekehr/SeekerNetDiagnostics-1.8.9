@@ -29,10 +29,15 @@ minecraft {
     runDir = "run"
     mappings = "stable_20"
     makeObfSourceJar = false
+    // Dev only: lets runClient / IntelliJ runs log into your Microsoft account (see DevAuth below).
+    // "main" is the Microsoft account entry in ~/.devauth/config.toml (created on DevAuth's first run).
+    clientJvmArgs += ['-Ddevauth.enabled=true', '-Ddevauth.account=main']
 }
 
 repositories {
     mavenCentral()
+    // DevAuth (dev-environment Microsoft login): https://github.com/DJtheRedstoner/DevAuth
+    maven { url = "https://pkgs.dev.azure.com/djtheredstoner/DevAuth/_packaging/public/maven/v1" }
 }
 
 dependencies {
@@ -40,6 +45,11 @@ dependencies {
     // libraries already shipped with Minecraft/Forge 1.8.9 (Netty, LWJGL).
     // JUnit 4.13.2 is the release that fixes CVE-2020-15250; test scope only.
     testCompile 'junit:junit:4.13.2'
+
+    // DevAuth: dev-only, so runClient can join online-mode servers. DevAuth's README says FG2 needs
+    // the main (implementation/compile) configuration because runtime-only is broken there.
+    // ForgeGradle 2.1 does not shade dependencies, so DevAuth is NOT packaged into the release JAR.
+    compile 'me.djtheredstoner:DevAuth-forge-legacy:1.2.2'
 }
 
 test {

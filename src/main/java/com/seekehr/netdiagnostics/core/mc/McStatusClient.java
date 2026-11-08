@@ -52,6 +52,25 @@ public final class McStatusClient {
         public McProtocol.StatusInfo status;
         public int responseBytes;
         public String protocolNote;
+        /** True when the status or ping step failed because the server did not answer in time. */
+        public boolean timedOut;
+
+        /** One outcome for the whole sample; SUCCESS only when the ping/pong completed. */
+        public ProbeOutcome outcome() {
+            if (tcpOutcome != ProbeOutcome.SUCCESS) {
+                return tcpOutcome;
+            }
+            if (pingOk) {
+                return ProbeOutcome.SUCCESS;
+            }
+            if ("cancelled".equals(error)) {
+                return ProbeOutcome.CANCELLED;
+            }
+            if (!statusOk) {
+                return timedOut ? ProbeOutcome.NO_RESPONSE : ProbeOutcome.PROTOCOL_ERROR;
+            }
+            return ProbeOutcome.NO_PONG;
+        }
     }
 
     public static Result ping(InetSocketAddress address, String handshakeHost, int timeoutMs,
@@ -115,7 +134,8 @@ public final class McStatusClient {
                 f = McProtocol.readFrame(in, maxResponseBytes);
             } catch (IOException e) {
                 r.failedStage = Stage.STATUS_REQUEST;
-                r.error = describeIo("status response", e, timeoutMs);
+                r.timedOut = e instanceof SocketTimeoutException;
+                r.error = cancelled(cancel) ? "cancelled" : describeIo("status response", e, timeoutMs);
                 return r;
             }
             r.statusResponseMs = (System.nanoTime() - s0) / 1e6;
@@ -163,7 +183,8 @@ public final class McStatusClient {
                 }
             } catch (IOException e) {
                 r.failedStage = Stage.PING;
-                r.error = describeIo("ping response", e, timeoutMs)
+                r.timedOut = e instanceof SocketTimeoutException;
+                r.error = cancelled(cancel) ? "cancelled" : describeIo("ping response", e, timeoutMs)
                         + " (some proxies close the connection after the status response)";
             }
             return r;
@@ -183,6 +204,10 @@ public final class McStatusClient {
                 // nothing to do
             }
         }
+    }
+
+    private static boolean cancelled(AtomicBoolean cancel) {
+        return cancel != null && cancel.get();
     }
 
     private static String describeIo(String what, IOException e, int timeoutMs) {

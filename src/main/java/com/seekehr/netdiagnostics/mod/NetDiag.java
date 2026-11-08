@@ -3,10 +3,7 @@ package com.seekehr.netdiagnostics.mod;
 import com.seekehr.netdiagnostics.SeekerNetDiagnostics;
 import com.seekehr.netdiagnostics.core.compare.CompareSession;
 import com.seekehr.netdiagnostics.core.config.Settings;
-import com.seekehr.netdiagnostics.core.monitor.LatencyMonitor;
 import com.seekehr.netdiagnostics.core.net.Target;
-import com.seekehr.netdiagnostics.core.quality.QualityEngine;
-import com.seekehr.netdiagnostics.core.report.Conclusions;
 import com.seekehr.netdiagnostics.core.report.ReportWriter;
 import com.seekehr.netdiagnostics.core.test.ResultStore;
 import com.seekehr.netdiagnostics.core.test.TestEngine;
@@ -14,6 +11,7 @@ import com.seekehr.netdiagnostics.core.test.TestRun;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ServerData;
 import net.minecraft.client.network.NetHandlerPlayClient;
+import net.minecraft.client.network.NetworkPlayerInfo;
 import net.minecraftforge.common.ForgeVersion;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -21,6 +19,7 @@ import org.apache.logging.log4j.Logger;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -37,27 +36,23 @@ public final class NetDiag {
     public static final Logger LOG = LogManager.getLogger(SeekerNetDiagnostics.NAME);
     private static NetDiag instance;
 
-    public final File dataDir;
     public final File reportsDir;
     public final SettingsStore settingsStore;
     private volatile Settings settings;
     public final TestEngine engine = new TestEngine();
     public final ResultStore results;
-    public final QualityEngine quality = new QualityEngine();
-    public final LatencyMonitor monitor;
     private final ExecutorService io;
     private final Set<Long> chatReported = ConcurrentHashMap.newKeySet();
     private volatile CompareSession compare;
 
     private NetDiag(File configDir) {
-        dataDir = new File(configDir, "netscope");
+        File dataDir = new File(configDir, "netscope");
         reportsDir = new File(dataDir, "reports");
         settingsStore = new SettingsStore(new File(configDir, SeekerNetDiagnostics.MODID + ".cfg"));
         settings = settingsStore.load();
         results = new ResultStore(new File(dataDir, "history.json"));
-        monitor = new LatencyMonitor(quality, settings.graphHistoryMinutes, settings.monitorIntervalMs);
-        io = new ThreadPoolExecutor(1, 1, 30, TimeUnit.SECONDS, new LinkedBlockingQueue<Runnable>(16),
-                new ThreadFactory() {
+        ThreadPoolExecutor ex = new ThreadPoolExecutor(1, 1, 30, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<Runnable>(16), new ThreadFactory() {
                     @Override
                     public Thread newThread(Runnable r) {
                         Thread t = new Thread(r, "SeekerNetDiagnostics-io");
@@ -65,7 +60,8 @@ public final class NetDiag {
                         return t;
                     }
                 }, new ThreadPoolExecutor.DiscardOldestPolicy());
-        ((ThreadPoolExecutor) io).allowCoreThreadTimeOut(true);
+        ex.allowCoreThreadTimeOut(true);
+        io = ex;
         engine.addListener(new TestEngine.Listener() {
             @Override
             public void onUpdate(TestRun run) {
@@ -77,8 +73,7 @@ public final class NetDiag {
         io.execute(new Runnable() {
             @Override
             public void run() {
-                int n = results.load();
-                LOG.info("Loaded {} saved test results", n);
+                LOG.info("Loaded {} saved test results", results.load());
             }
         });
     }
@@ -99,13 +94,8 @@ public final class NetDiag {
     }
 
     public void applySettings(Settings s) {
-        Settings old = settings;
         settings = s.sanitize();
         settingsStore.save(settings);
-        monitor.resize(settings.graphHistoryMinutes, settings.monitorIntervalMs);
-        if (old.packetInstrumentation != settings.packetInstrumentation) {
-            ClientEvents.refreshInstrumentation();
-        }
     }
 
     public CompareSession compareSession() {
@@ -118,11 +108,9 @@ public final class NetDiag {
 
     // ------------------------------------------------------------------ tests
 
-    public TestRun startTest(TestRun.Kind kind, Target target, int samples, String profile, String exitLagDesc,
-                             boolean reportToChat) {
+    public TestRun startTest(Target target, int samples, String profile, String exitLagDesc, boolean reportToChat) {
         Settings s = settings;
-        TestRun run = new TestRun(kind, target, samples, s.warmupSamples, s.intervalMs, s.tcpTimeoutMs,
-                s.statusTimeoutMs, profile, exitLagDesc);
+        TestRun run = new TestRun(target, samples, s.warmupSamples, s.intervalMs, s.timeoutMs, profile, exitLagDesc);
         if (reportToChat) {
             chatReported.add(run.id);
         }
@@ -135,9 +123,8 @@ public final class NetDiag {
     }
 
     private void onRunFinished(final TestRun run) {
-        if (run.state != TestRun.State.CANCELLED || run.measuredAttempts() > 0) {
+        if (run.measuredAttempts() > 0) {
             results.add(run);
-            quality.onTcpRun(run, results.previousFor(run));
             saveHistoryAsync();
         }
         if (chatReported.remove(run.id)) {
@@ -165,7 +152,6 @@ public final class NetDiag {
 
     public void clearHistory() {
         results.clear();
-        quality.clear();
         saveHistoryAsync();
     }
 
@@ -192,17 +178,15 @@ public final class NetDiag {
         }
     }
 
-    public static String currentRemoteAddress() {
-        NetHandlerPlayClient h = Minecraft.getMinecraft().getNetHandler();
-        if (h == null || h.getNetworkManager() == null || h.getNetworkManager().isLocalChannel()) {
-            return null;
+    /** The ping Minecraft shows in the tab list for the local player, or -1 (read-only). */
+    public static int tabListPing() {
+        Minecraft mc = Minecraft.getMinecraft();
+        NetHandlerPlayClient h = mc.getNetHandler();
+        if (h == null || mc.thePlayer == null || currentServer() == null) {
+            return -1;
         }
-        java.net.SocketAddress a = h.getNetworkManager().getRemoteAddress();
-        if (a instanceof java.net.InetSocketAddress) {
-            java.net.InetSocketAddress ia = (java.net.InetSocketAddress) a;
-            return (ia.getAddress() != null ? ia.getAddress().getHostAddress() : ia.getHostString()) + ":" + ia.getPort();
-        }
-        return a == null ? null : a.toString();
+        NetworkPlayerInfo info = h.getPlayerInfo(mc.thePlayer.getUniqueID());
+        return info == null ? -1 : info.getResponseTime();
     }
 
     // ------------------------------------------------------------------ export
@@ -213,10 +197,7 @@ public final class NetDiag {
         m.put("minecraftVersion", ForgeVersion.mcVersion);
         m.put("forgeVersion", ForgeVersion.getVersion());
         m.put("javaVersion", System.getProperty("java.version"));
-        m.put("javaVendor", System.getProperty("java.vendor"));
-        m.put("os", System.getProperty("os.name") + " " + System.getProperty("os.version") + " ("
-                + System.getProperty("os.arch") + ")");
-        m.put("measurementOrigin", "In-process sockets opened by the running Minecraft JVM");
+        m.put("os", System.getProperty("os.name") + " " + System.getProperty("os.version"));
         return m;
     }
 
@@ -227,10 +208,7 @@ public final class NetDiag {
         m.put("detailedSamples", s.detailedSamples);
         m.put("warmupSamples", s.warmupSamples);
         m.put("intervalMs", s.intervalMs);
-        m.put("tcpTimeoutMs", s.tcpTimeoutMs);
-        m.put("statusTimeoutMs", s.statusTimeoutMs);
-        m.put("monitorIntervalMs", s.monitorIntervalMs);
-        m.put("packetInstrumentation", s.packetInstrumentation);
+        m.put("timeoutMs", s.timeoutMs);
         m.put("preferIpv4", s.preferIpv4);
         return m;
     }
@@ -242,20 +220,17 @@ public final class NetDiag {
     /** Collects data on the client thread, writes files on the IO thread, calls back on the client thread. */
     public void exportAll(final ExportCallback cb) {
         final Settings s = settings;
-        final ReportWriter.Input in = new ReportWriter.Input();
-        in.environment = environment();
-        in.settings = settingsMap();
-        in.runs = new ArrayList<TestRun>(results.all());
-        java.util.Collections.reverse(in.runs); // chronological
-        CompareSession c = compare;
-        in.comparison = c == null ? null : c.toMap();
-        in.monitor = monitor.toMap(System.currentTimeMillis());
-        in.alerts = quality.alerts();
-        in.includeLocalAddresses = s.exportIncludeLocalAddresses;
         if (!s.exportJson && !s.exportCsv) {
             cb.done(new ArrayList<File>(), "Both JSON and CSV export are disabled in settings.");
             return;
         }
+        final ReportWriter.Input in = new ReportWriter.Input();
+        in.environment = environment();
+        in.settings = settingsMap();
+        in.runs = new ArrayList<TestRun>(results.all());
+        Collections.reverse(in.runs); // chronological
+        CompareSession c = compare;
+        in.comparison = c == null ? null : c.toMap();
         io.execute(new Runnable() {
             @Override
             public void run() {
@@ -272,44 +247,6 @@ public final class NetDiag {
                     @Override
                     public void run() {
                         cb.done(f, e);
-                    }
-                });
-            }
-        });
-    }
-
-    /** Writes a small text file with the target for use in external tools; returns via callback. */
-    public void exportTarget(final String host, final String ip, final int port, final ExportCallback cb) {
-        io.execute(new Runnable() {
-            @Override
-            public void run() {
-                List<File> files = new ArrayList<File>();
-                String err = null;
-                try {
-                    if (!reportsDir.isDirectory() && !reportsDir.mkdirs()) {
-                        throw new IOException("cannot create " + reportsDir);
-                    }
-                    String safe = host.replaceAll("[^A-Za-z0-9._-]", "_");
-                    File f = new File(reportsDir, "target-" + safe + "-" + port + ".txt");
-                    String target = ip != null ? ip : host;
-                    String text = "SeekerNetDiagnostics target export\r\n"
-                            + "Host: " + host + "\r\nResolved IP: " + (ip == null ? "(not resolved yet)" : ip)
-                            + "\r\nPort: " + port + "\r\n\r\n"
-                            + "Run these yourself in a terminal if you want path information. Note that ICMP-based "
-                            + "tools usually bypass ExitLag and may not follow the optimized game route:\r\n"
-                            + "  tracert " + target + "\r\n  pathping " + target + "\r\n\r\n"
-                            + Conclusions.EXITLAG_NOT_VERIFIED + "\r\n";
-                    ReportWriter.writeFile(f, text);
-                    files.add(f);
-                } catch (IOException e) {
-                    err = e.getMessage();
-                }
-                final List<File> fl = files;
-                final String e = err;
-                Minecraft.getMinecraft().addScheduledTask(new Runnable() {
-                    @Override
-                    public void run() {
-                        cb.done(fl, e);
                     }
                 });
             }

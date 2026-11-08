@@ -75,7 +75,7 @@ public final class ResultStore {
                 seen = true;
                 continue;
             }
-            if (seen && r.target.equals(run.target) && r.kind == run.kind && !r.summary().isEmpty()) {
+            if (seen && r.target.equals(run.target) && !r.summary().isEmpty()) {
                 return r;
             }
         }
@@ -89,8 +89,7 @@ public final class ResultStore {
         for (TestRun r : all()) {
             if (f.isEmpty() || r.target.display().toLowerCase(Locale.ROOT).contains(f)
                     || (r.resolvedAddress != null && r.resolvedAddress.contains(f))
-                    || (r.profileLabel != null && r.profileLabel.toLowerCase(Locale.ROOT).contains(f))
-                    || r.kind.label.toLowerCase(Locale.ROOT).contains(f)) {
+                    || (r.profileLabel != null && r.profileLabel.toLowerCase(Locale.ROOT).contains(f))) {
                 out.add(r);
             }
         }
@@ -136,11 +135,11 @@ public final class ResultStore {
 
     public void save() throws IOException {
         Map<String, Object> root = new LinkedHashMap<String, Object>();
-        root.put("format", 1);
+        root.put("format", 2);
         List<Object> list = new ArrayList<Object>();
         for (TestRun r : all()) {
             if (r.finished()) {
-                list.add(r.toMap(false));
+                list.add(r.toMap());
             }
         }
         root.put("runs", list);

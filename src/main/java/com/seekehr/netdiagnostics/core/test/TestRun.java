@@ -1,9 +1,9 @@
 package com.seekehr.netdiagnostics.core.test;
 
 import com.seekehr.netdiagnostics.core.dns.DnsInfo;
+import com.seekehr.netdiagnostics.core.dns.DnsResolver;
 import com.seekehr.netdiagnostics.core.json.Json;
 import com.seekehr.netdiagnostics.core.mc.McProtocol;
-import com.seekehr.netdiagnostics.core.mc.McStatusClient;
 import com.seekehr.netdiagnostics.core.net.ProbeOutcome;
 import com.seekehr.netdiagnostics.core.net.Target;
 import com.seekehr.netdiagnostics.core.stats.RttStats;
@@ -19,67 +19,58 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * One diagnostic test session against a target. Written by the worker thread, read by the GUI;
- * mutable collections are guarded by {@code this}.
+ * One test: repeated Minecraft server-list pings to a target. Each sample is a fresh connection
+ * (handshake → status → ping/pong), so it travels the same path as the game's own connection,
+ * including any process-level optimizer such as ExitLag.
+ *
+ * <p>Written by the worker thread, read by the GUI; mutable collections are guarded by {@code this}.</p>
  */
 public final class TestRun {
     private static final AtomicLong IDS = new AtomicLong(System.currentTimeMillis());
 
-    public enum Kind {
-        /** TCP handshake samples plus one Minecraft status ping. */
-        FULL("TCP + Minecraft status"),
-        /** TCP handshake samples only. */
-        TCP("TCP handshake");
-
-        public final String label;
-
-        Kind(String label) {
-            this.label = label;
-        }
-    }
+    /**
+     * A TCP handshake to a public address that completes faster than this cannot have reached the
+     * remote server; a local proxy accepted it.
+     */
+    public static final double LOCAL_INTERCEPT_MS = 1.5;
 
     public enum State {
         QUEUED, RUNNING, DONE, CANCELLED, FAILED
     }
 
+    /** One sample. {@link #pingMs} is the measurement; the other timings are diagnostic. */
     public static final class Attempt {
         public final int index;
         public final boolean warmup;
         public final long timestamp;
         public final ProbeOutcome outcome;
-        public final double rttMs;
-        public final double elapsedMs;
-        public final String localAddress;
-        public final int localPort;
-        public final String remoteAddress;
-        public final int remotePort;
+        /** Ping packet sent → matching pong received, ms. NaN unless SUCCESS. */
+        public final double pingMs;
+        /** TCP connect time, ms (NaN if the connection failed). */
+        public final double connectMs;
+        /** Status request sent → status response received, ms (includes server processing). */
+        public final double statusMs;
         public final String detail;
 
-        public Attempt(int index, boolean warmup, long timestamp, ProbeOutcome outcome, double rttMs,
-                       double elapsedMs, String localAddress, int localPort, String remoteAddress, int remotePort,
-                       String detail) {
+        public Attempt(int index, boolean warmup, long timestamp, ProbeOutcome outcome, double pingMs,
+                       double connectMs, double statusMs, String detail) {
             this.index = index;
             this.warmup = warmup;
             this.timestamp = timestamp;
             this.outcome = outcome;
-            this.rttMs = outcome == ProbeOutcome.SUCCESS ? rttMs : Double.NaN;
-            this.elapsedMs = elapsedMs;
-            this.localAddress = localAddress;
-            this.localPort = localPort;
-            this.remoteAddress = remoteAddress;
-            this.remotePort = remotePort;
+            this.pingMs = outcome == ProbeOutcome.SUCCESS ? pingMs : Double.NaN;
+            this.connectMs = connectMs;
+            this.statusMs = statusMs;
             this.detail = detail;
         }
     }
 
     public final long id;
-    public final Kind kind;
     public final Target target;
     public final int samplesRequested;
     public final int warmupRequested;
     public final int intervalMs;
-    public final int tcpTimeoutMs;
-    public final int statusTimeoutMs;
+    public final int timeoutMs;
     public final String profileLabel;
     public final String exitLagDescription;
     public final AtomicBoolean cancelFlag = new AtomicBoolean();
@@ -92,29 +83,28 @@ public final class TestRun {
     public volatile int connectPort;
     public volatile String resolvedAddress;
     public volatile DnsInfo dns;
-    public volatile McStatusClient.Result mcStatus;
+    /** Server info from the most recent successful status response. */
+    public volatile McProtocol.StatusInfo serverInfo;
+    public volatile String protocolNote;
     public volatile String error;
     public volatile String phase = "Queued";
 
     private final List<Attempt> attempts = new ArrayList<Attempt>();
     private volatile StatSummary summary = StatSummary.EMPTY;
 
-    public TestRun(Kind kind, Target target, int samples, int warmup, int intervalMs, int tcpTimeoutMs,
-                   int statusTimeoutMs, String profileLabel, String exitLagDescription) {
-        this(IDS.incrementAndGet(), kind, target, samples, warmup, intervalMs, tcpTimeoutMs, statusTimeoutMs,
-                profileLabel, exitLagDescription);
+    public TestRun(Target target, int samples, int warmup, int intervalMs, int timeoutMs, String profileLabel,
+                   String exitLagDescription) {
+        this(IDS.incrementAndGet(), target, samples, warmup, intervalMs, timeoutMs, profileLabel, exitLagDescription);
     }
 
-    private TestRun(long id, Kind kind, Target target, int samples, int warmup, int intervalMs, int tcpTimeoutMs,
-                    int statusTimeoutMs, String profileLabel, String exitLagDescription) {
+    private TestRun(long id, Target target, int samples, int warmup, int intervalMs, int timeoutMs,
+                    String profileLabel, String exitLagDescription) {
         this.id = id;
-        this.kind = kind;
         this.target = target;
         this.samplesRequested = samples;
         this.warmupRequested = warmup;
         this.intervalMs = intervalMs;
-        this.tcpTimeoutMs = tcpTimeoutMs;
-        this.statusTimeoutMs = statusTimeoutMs;
+        this.timeoutMs = timeoutMs;
         this.profileLabel = profileLabel;
         this.exitLagDescription = exitLagDescription;
         this.connectHost = target.host;
@@ -133,29 +123,64 @@ public final class TestRun {
     }
 
     private double[] successfulSamplesLocked() {
-        int n = 0;
+        List<Double> v = new ArrayList<Double>();
         for (Attempt a : attempts) {
             if (!a.warmup && a.outcome == ProbeOutcome.SUCCESS) {
-                n++;
+                v.add(a.pingMs);
             }
         }
-        double[] out = new double[n];
-        int i = 0;
-        for (Attempt a : attempts) {
-            if (!a.warmup && a.outcome == ProbeOutcome.SUCCESS) {
-                out[i++] = a.rttMs;
-            }
+        return toArray(v);
+    }
+
+    private static double[] toArray(List<Double> v) {
+        double[] out = new double[v.size()];
+        for (int i = 0; i < out.length; i++) {
+            out[i] = v.get(i);
         }
         return out;
     }
 
-    /** Successful, non-warm-up handshake times in measurement order. */
+    /** Successful, non-warm-up ping times in measurement order. */
     public synchronized double[] successfulSamples() {
         return successfulSamplesLocked();
     }
 
+    /** Ping statistics (the headline measurement). */
     public StatSummary summary() {
         return summary;
+    }
+
+    /** TCP connect-time statistics over every measured sample that connected. */
+    public synchronized StatSummary connectSummary() {
+        List<Double> v = new ArrayList<Double>();
+        for (Attempt a : attempts) {
+            if (!a.warmup && !Double.isNaN(a.connectMs)) {
+                v.add(a.connectMs);
+            }
+        }
+        return RttStats.summarize(toArray(v));
+    }
+
+    /** Status-response statistics (application-level, includes server processing). */
+    public synchronized StatSummary statusSummary() {
+        List<Double> v = new ArrayList<Double>();
+        for (Attempt a : attempts) {
+            if (!a.warmup && !Double.isNaN(a.statusMs)) {
+                v.add(a.statusMs);
+            }
+        }
+        return RttStats.summarize(toArray(v));
+    }
+
+    /**
+     * True when TCP connections to a public address completed faster than a remote server could
+     * answer, i.e. a local proxy (such as ExitLag) accepted them. This shows interception, not which
+     * route the proxy then used.
+     */
+    public boolean localInterceptDetected() {
+        StatSummary c = connectSummary();
+        return !c.isEmpty() && c.median < LOCAL_INTERCEPT_MS && resolvedAddress != null
+                && !DnsResolver.isLocalOrPrivate(resolvedAddress);
     }
 
     public synchronized int measuredAttempts() {
@@ -199,18 +224,15 @@ public final class TestRun {
         return s == State.DONE || s == State.CANCELLED || s == State.FAILED;
     }
 
-    /** Fraction of measured attempts completed, 0..1. */
+    /** Fraction of samples completed, 0..1. */
     public double progress() {
         if (finished()) {
             return 1.0;
         }
-        int total = samplesRequested + warmupRequested + (kind == Kind.FULL ? 1 : 0);
+        int total = samplesRequested + warmupRequested;
         int done;
         synchronized (this) {
             done = attempts.size();
-        }
-        if (mcStatus != null) {
-            done++;
         }
         return total == 0 ? 0 : Math.min(1.0, done / (double) total);
     }
@@ -222,11 +244,10 @@ public final class TestRun {
 
     // ------------------------------------------------------------------ serialisation
 
-    public Map<String, Object> toMap(boolean includeLocalAddresses) {
+    public Map<String, Object> toMap() {
         Map<String, Object> m = new LinkedHashMap<String, Object>();
         m.put("id", id);
-        m.put("kind", kind.name());
-        m.put("testMethod", kind.label);
+        m.put("testMethod", "Minecraft server-list ping (status + ping/pong), new connection per sample");
         m.put("state", state.name());
         m.put("host", target.host);
         m.put("port", target.port);
@@ -240,21 +261,33 @@ public final class TestRun {
         m.put("samplesRequested", samplesRequested);
         m.put("warmupSamples", warmupRequested);
         m.put("intervalMs", intervalMs);
-        m.put("tcpTimeoutMs", tcpTimeoutMs);
-        m.put("statusTimeoutMs", statusTimeoutMs);
+        m.put("timeoutMs", timeoutMs);
         m.put("profileLabel", profileLabel);
         m.put("exitLagSettingsDescription", exitLagDescription);
         m.put("origin", "Minecraft client JVM (in-process socket)");
+        m.put("localInterceptDetected", localInterceptDetected());
         m.put("exitLagRouting", "not verified");
         m.put("error", error);
-        m.put("dns", dns == null ? null : dns.toMap(includeLocalAddresses));
-        StatSummary s = summary;
-        m.put("summary", summaryMap(s));
+        m.put("dns", dns == null ? null : dns.toMap());
+        m.put("pingSummary", summaryMap(summary));
+        m.put("connectSummary", summaryMap(connectSummary()));
+        m.put("statusSummary", summaryMap(statusSummary()));
         Map<String, Object> counts = new LinkedHashMap<String, Object>();
         for (Map.Entry<ProbeOutcome, Integer> e : outcomeCounts().entrySet()) {
             counts.put(e.getKey().name(), e.getValue());
         }
-        m.put("failureCategories", counts);
+        m.put("outcomes", counts);
+        McProtocol.StatusInfo si = serverInfo;
+        if (si != null) {
+            Map<String, Object> sm = new LinkedHashMap<String, Object>();
+            sm.put("versionName", si.versionName);
+            sm.put("protocol", si.protocol);
+            sm.put("onlinePlayers", si.onlinePlayers);
+            sm.put("maxPlayers", si.maxPlayers);
+            sm.put("motd", si.motd);
+            m.put("server", sm);
+        }
+        m.put("protocolNote", protocolNote);
         List<Object> list = new ArrayList<Object>();
         for (Attempt a : attempts()) {
             Map<String, Object> am = new LinkedHashMap<String, Object>();
@@ -262,48 +295,19 @@ public final class TestRun {
             am.put("warmup", a.warmup);
             am.put("timestamp", a.timestamp);
             am.put("outcome", a.outcome.name());
-            am.put("rttMs", a.rttMs);
-            am.put("elapsedMs", a.elapsedMs);
-            am.put("remote", a.remoteAddress);
-            am.put("remotePort", a.remotePort);
-            if (includeLocalAddresses) {
-                am.put("localAddress", a.localAddress);
-                am.put("localPort", a.localPort);
-            }
+            am.put("pingMs", a.pingMs);
+            am.put("connectMs", a.connectMs);
+            am.put("statusMs", a.statusMs);
             am.put("detail", a.detail);
             list.add(am);
         }
-        m.put("attempts", list);
-        McStatusClient.Result st = mcStatus;
-        if (st != null) {
-            Map<String, Object> sm = new LinkedHashMap<String, Object>();
-            sm.put("handshakeHost", st.handshakeHost);
-            sm.put("tcpOutcome", st.tcpOutcome.name());
-            sm.put("tcpConnectMs", st.tcpConnectMs);
-            sm.put("statusOk", st.statusOk);
-            sm.put("statusResponseMs", st.statusResponseMs);
-            sm.put("pingOk", st.pingOk);
-            sm.put("pingPongMs", st.pingPongMs);
-            sm.put("failedStage", st.failedStage == null ? null : st.failedStage.name());
-            sm.put("error", st.error);
-            sm.put("protocolNote", st.protocolNote);
-            sm.put("responseBytes", st.responseBytes);
-            if (st.status != null) {
-                sm.put("versionName", st.status.versionName);
-                sm.put("protocol", st.status.protocol);
-                sm.put("onlinePlayers", st.status.onlinePlayers);
-                sm.put("maxPlayers", st.status.maxPlayers);
-                sm.put("motd", st.status.motd);
-                sm.put("modType", st.status.modType);
-            }
-            m.put("minecraftStatus", sm);
-        }
+        m.put("samples", list);
         return m;
     }
 
     public static Map<String, Object> summaryMap(StatSummary s) {
         Map<String, Object> m = new LinkedHashMap<String, Object>();
-        m.put("successfulSamples", s.count);
+        m.put("count", s.count);
         m.put("meanMs", s.mean);
         m.put("medianMs", s.median);
         m.put("minMs", s.min);
@@ -315,17 +319,19 @@ public final class TestRun {
         return m;
     }
 
-    /** Restores a run persisted with {@link #toMap(boolean)}. Returns null on malformed input. */
+    /** Restores a run saved with {@link #toMap()}. Returns null on malformed or older-format input. */
     public static TestRun fromMap(Map<String, Object> m) {
         try {
-            Kind kind = Kind.valueOf(Json.str(m, "kind", "TCP"));
+            List<Object> samples = Json.arr(m.get("samples"));
+            if (samples == null) {
+                return null; // pre-1.0 format (TCP handshake based): not comparable, skip
+            }
             Target t = new Target(Json.str(m, "host", "?"), (int) Json.num(m, "port", 25565),
                     Json.bool(m, "portExplicit", true));
-            TestRun r = new TestRun((long) Json.num(m, "id", IDS.incrementAndGet()), kind, t,
+            TestRun r = new TestRun((long) Json.num(m, "id", IDS.incrementAndGet()), t,
                     (int) Json.num(m, "samplesRequested", 0), (int) Json.num(m, "warmupSamples", 0),
-                    (int) Json.num(m, "intervalMs", 0), (int) Json.num(m, "tcpTimeoutMs", 0),
-                    (int) Json.num(m, "statusTimeoutMs", 0), Json.str(m, "profileLabel", null),
-                    Json.str(m, "exitLagSettingsDescription", null));
+                    (int) Json.num(m, "intervalMs", 0), (int) Json.num(m, "timeoutMs", 0),
+                    Json.str(m, "profileLabel", null), Json.str(m, "exitLagSettingsDescription", null));
             r.state = State.valueOf(Json.str(m, "state", "DONE"));
             if (r.state == State.RUNNING || r.state == State.QUEUED) {
                 r.state = State.CANCELLED;
@@ -336,33 +342,28 @@ public final class TestRun {
             r.connectPort = (int) Json.num(m, "connectPort", t.port);
             r.resolvedAddress = Json.str(m, "resolvedAddress", null);
             r.error = Json.str(m, "error", null);
-            List<Object> atts = Json.arr(m.get("attempts"));
-            if (atts != null) {
-                for (Object o : atts) {
-                    Map<String, Object> am = Json.obj(o);
-                    if (am == null) {
-                        continue;
-                    }
-                    ProbeOutcome out = ProbeOutcome.valueOf(Json.str(am, "outcome", "UNKNOWN"));
-                    double rtt = Json.num(am, "rttMs", Double.NaN);
-                    if (out == ProbeOutcome.SUCCESS && (Double.isNaN(rtt) || rtt < 0)) {
-                        out = ProbeOutcome.UNKNOWN;
-                    }
-                    r.addAttempt(new Attempt((int) Json.num(am, "index", 0), Json.bool(am, "warmup", false),
-                            (long) Json.num(am, "timestamp", 0), out, rtt, Json.num(am, "elapsedMs", Double.NaN),
-                            Json.str(am, "localAddress", null), (int) Json.num(am, "localPort", 0),
-                            Json.str(am, "remote", null), (int) Json.num(am, "remotePort", 0),
-                            Json.str(am, "detail", null)));
+            r.protocolNote = Json.str(m, "protocolNote", null);
+            for (Object o : samples) {
+                Map<String, Object> am = Json.obj(o);
+                if (am == null) {
+                    continue;
                 }
+                ProbeOutcome out = ProbeOutcome.valueOf(Json.str(am, "outcome", "UNKNOWN"));
+                double ping = Json.num(am, "pingMs", Double.NaN);
+                if (out == ProbeOutcome.SUCCESS && (Double.isNaN(ping) || ping < 0)) {
+                    out = ProbeOutcome.UNKNOWN;
+                }
+                r.addAttempt(new Attempt((int) Json.num(am, "index", 0), Json.bool(am, "warmup", false),
+                        (long) Json.num(am, "timestamp", 0), out, ping, Json.num(am, "connectMs", Double.NaN),
+                        Json.num(am, "statusMs", Double.NaN), Json.str(am, "detail", null)));
             }
             Map<String, Object> dm = Json.obj(m.get("dns"));
             if (dm != null) {
                 DnsInfo d = new DnsInfo();
                 d.query = Json.str(dm, "query", null);
                 d.ipLiteral = Json.bool(dm, "ipLiteral", false);
-                d.systemLookupMs = Json.num(dm, "systemLookupMs", Double.NaN);
+                d.lookupMs = Json.num(dm, "lookupMs", Double.NaN);
                 d.srvRecord = Json.str(dm, "srvRecord", null);
-                d.minTtlSeconds = (long) Json.num(dm, "minTtlSeconds", -1);
                 d.error = Json.str(dm, "error", null);
                 List<Object> addrs = Json.arr(dm.get("addresses"));
                 if (addrs != null) {
@@ -374,31 +375,15 @@ public final class TestRun {
                 }
                 r.dns = d;
             }
-            Map<String, Object> sm = Json.obj(m.get("minecraftStatus"));
+            Map<String, Object> sm = Json.obj(m.get("server"));
             if (sm != null) {
-                McStatusClient.Result st = new McStatusClient.Result();
-                st.handshakeHost = Json.str(sm, "handshakeHost", null);
-                st.tcpOutcome = ProbeOutcome.valueOf(Json.str(sm, "tcpOutcome", "UNKNOWN"));
-                st.tcpConnectMs = Json.num(sm, "tcpConnectMs", Double.NaN);
-                st.statusOk = Json.bool(sm, "statusOk", false);
-                st.statusResponseMs = Json.num(sm, "statusResponseMs", Double.NaN);
-                st.pingOk = Json.bool(sm, "pingOk", false);
-                st.pingPongMs = Json.num(sm, "pingPongMs", Double.NaN);
-                st.error = Json.str(sm, "error", null);
-                st.protocolNote = Json.str(sm, "protocolNote", null);
-                String fs = Json.str(sm, "failedStage", null);
-                st.failedStage = fs == null ? null : McStatusClient.Stage.valueOf(fs);
-                if (st.statusOk) {
-                    McProtocol.StatusInfo si = new McProtocol.StatusInfo();
-                    si.versionName = Json.str(sm, "versionName", null);
-                    si.protocol = (int) Json.num(sm, "protocol", -1);
-                    si.onlinePlayers = (int) Json.num(sm, "onlinePlayers", -1);
-                    si.maxPlayers = (int) Json.num(sm, "maxPlayers", -1);
-                    si.motd = Json.str(sm, "motd", null);
-                    si.modType = Json.str(sm, "modType", null);
-                    st.status = si;
-                }
-                r.mcStatus = st;
+                McProtocol.StatusInfo si = new McProtocol.StatusInfo();
+                si.versionName = Json.str(sm, "versionName", null);
+                si.protocol = (int) Json.num(sm, "protocol", -1);
+                si.onlinePlayers = (int) Json.num(sm, "onlinePlayers", -1);
+                si.maxPlayers = (int) Json.num(sm, "maxPlayers", -1);
+                si.motd = Json.str(sm, "motd", null);
+                r.serverInfo = si;
             }
             r.phase = "Finished";
             return r;

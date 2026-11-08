@@ -16,10 +16,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
-/** "Test an IP" / "Test My Connection" screen. */
+/** "Test an IP" / "Test My Connection": repeated Minecraft pings to one target. */
 public final class GuiTestTarget extends GuiBase {
     private static final int ID_START = 1;
-    private static final int ID_KIND = 2;
     private static final int ID_MODE = 3;
     private static final int ID_CURRENT = 4;
     private static final int ID_COPY_SUMMARY = 5;
@@ -27,11 +26,11 @@ public final class GuiTestTarget extends GuiBase {
     private static final int ID_COMPARE = 7;
     private static final int ID_COPY_IP = 8;
     private static final String DEFAULT_PORT = String.valueOf(Target.DEFAULT_PORT);
+    private static final long REFRESH_MS = 250;
 
     private String hostText;
     private String portText;
     private boolean autoStart;
-    private TestRun.Kind kind = TestRun.Kind.FULL;
     private boolean detailed;
     private String notice;
     private String error;
@@ -44,17 +43,14 @@ public final class GuiTestTarget extends GuiBase {
     private long lastRefresh;
     private List<TestRun.Attempt> attempts = new ArrayList<TestRun.Attempt>();
     private List<String> conclusions = new ArrayList<String>();
+    private int tabPing = -1;
+    private List<String> pendingTip;
 
     public GuiTestTarget(GuiScreen parent, String host, String port, boolean autoStart) {
         super(parent, "Test an IP");
         this.hostText = host == null ? "" : host;
         this.portText = port == null || port.isEmpty() ? DEFAULT_PORT : port;
         this.autoStart = autoStart && !this.hostText.isEmpty();
-    }
-
-    public GuiTestTarget withKind(TestRun.Kind k) {
-        kind = k;
-        return this;
     }
 
     public GuiTestTarget withNotice(String n) {
@@ -64,7 +60,7 @@ public final class GuiTestTarget extends GuiBase {
 
     @Override
     protected String subtitle() {
-        return "TCP handshake timing and Minecraft status ping";
+        return "repeated Minecraft ping from this game process";
     }
 
     private int leftW() {
@@ -85,23 +81,19 @@ public final class GuiTestTarget extends GuiBase {
         if (!autoStart && hostText.isEmpty()) {
             hostField.setFocused(true);
         }
-        button(ID_KIND, x, y + 64, w, 16, kindLabel(), FlatButton.Style.NORMAL)
-                .tip("TCP + Minecraft status: handshake samples plus one server-list ping (status + ping/pong). "
-                        + "TCP only: handshake samples to exactly this port, nothing else.");
-        button(ID_MODE, x, y + 84, w, 16, modeLabel(), FlatButton.Style.NORMAL)
-                .tip("Quick uses fewer samples; Detailed gives more reliable percentiles. Change counts in Settings.");
-        startBtn = button(ID_START, x, y + 106, w, 22, "Start Test", FlatButton.Style.PRIMARY);
-        FlatButton cur = button(ID_CURRENT, x, y + 132, w, 14, "Use current server", FlatButton.Style.GHOST);
-        cur.enabled = NetDiag.currentServerTarget() != null;
+        button(ID_MODE, x, y + 64, w, 16, modeLabel(), FlatButton.Style.NORMAL)
+                .tip("Quick uses fewer pings; Detailed gives more reliable percentiles. Counts are in Settings.");
+        startBtn = button(ID_START, x, y + 86, w, 22, "Start Test", FlatButton.Style.PRIMARY);
+        button(ID_CURRENT, x, y + 112, w, 14, "Use current server", FlatButton.Style.GHOST).enabled =
+                NetDiag.currentServerTarget() != null;
 
         int rx = leftW() + 14;
         int rw = width - rx - 8;
-        int by = height - 32;
         int bw = (rw - 16 - 12) / 4;
-        String[] labels = {"Copy Summary", "Advanced Details", "Compare Routes", "Copy IP"};
+        String[] labels = {"Copy Summary", "Details", "Compare Routes", "Copy IP"};
         int[] ids = {ID_COPY_SUMMARY, ID_DETAILS, ID_COMPARE, ID_COPY_IP};
         for (int i = 0; i < 4; i++) {
-            button(ids[i], rx + 8 + i * (bw + 4), by, i == 3 ? rw - 16 - 3 * (bw + 4) : bw, 16, labels[i],
+            button(ids[i], rx + 8 + i * (bw + 4), height - 32, i == 3 ? rw - 16 - 3 * (bw + 4) : bw, 16, labels[i],
                     FlatButton.Style.NORMAL);
         }
         updateButtons();
@@ -109,10 +101,6 @@ public final class GuiTestTarget extends GuiBase {
             autoStart = false;
             start();
         }
-    }
-
-    private String kindLabel() {
-        return kind == TestRun.Kind.FULL ? "Type: TCP + Minecraft status" : "Type: TCP handshake only";
     }
 
     private String modeLabel() {
@@ -135,11 +123,9 @@ public final class GuiTestTarget extends GuiBase {
         for (GuiButton b : buttonList) {
             if (b.id == ID_COPY_SUMMARY || b.id == ID_DETAILS || b.id == ID_COMPARE) {
                 b.enabled = has;
-            }
-            if (b.id == ID_COPY_IP) {
+            } else if (b.id == ID_COPY_IP) {
                 b.enabled = run != null && run.resolvedAddress != null;
-            }
-            if (b.id == ID_KIND || b.id == ID_MODE) {
+            } else if (b.id == ID_MODE) {
                 b.enabled = !r;
             }
         }
@@ -152,15 +138,14 @@ public final class GuiTestTarget extends GuiBase {
         Target t;
         try {
             // The default port allows a Minecraft SRV lookup for host names, like the vanilla client with no port.
-            boolean defaultPort = DEFAULT_PORT.equals(portText);
-            t = Target.parse(hostText, defaultPort || portText.isEmpty() ? null : portText);
+            t = Target.parse(hostText, DEFAULT_PORT.equals(portText) || portText.isEmpty() ? null : portText);
         } catch (IllegalArgumentException e) {
             error = e.getMessage();
             return;
         }
         int samples = detailed ? nd.settings().detailedSamples : nd.settings().quickSamples;
         try {
-            run = nd.startTest(kind, t, samples, null, null, false);
+            run = nd.startTest(t, samples, null, null, false);
         } catch (IllegalStateException e) {
             error = e.getMessage();
             return;
@@ -181,10 +166,6 @@ public final class GuiTestTarget extends GuiBase {
                     start();
                 }
                 break;
-            case ID_KIND:
-                kind = kind == TestRun.Kind.FULL ? TestRun.Kind.TCP : TestRun.Kind.FULL;
-                b.displayString = kindLabel();
-                break;
             case ID_MODE:
                 detailed = !detailed;
                 b.displayString = modeLabel();
@@ -202,7 +183,7 @@ public final class GuiTestTarget extends GuiBase {
                 }
                 break;
             case ID_DETAILS:
-                mc.displayGuiScreen(new GuiAdvancedTcp(this, run));
+                mc.displayGuiScreen(new GuiRunDetails(this, run));
                 break;
             case ID_COMPARE:
                 if (run != null) {
@@ -232,13 +213,19 @@ public final class GuiTestTarget extends GuiBase {
 
     // ------------------------------------------------------------------ drawing
 
+    private boolean testingCurrentServer() {
+        Target cur = NetDiag.currentServerTarget();
+        return cur != null && run != null && cur.host.equalsIgnoreCase(run.target.host);
+    }
+
     @Override
     protected void drawContent(int mouseX, int mouseY, float partialTicks) {
         long now = System.currentTimeMillis();
-        if (run != null && now - lastRefresh >= nd.settings().dashboardRefreshMs) {
+        if (run != null && now - lastRefresh >= REFRESH_MS) {
             lastRefresh = now;
             attempts = run.attempts();
             conclusions = Conclusions.describe(run);
+            tabPing = testingCurrentServer() ? NetDiag.tabListPing() : -1;
             updateButtons();
         }
         int lw = leftW();
@@ -247,9 +234,9 @@ public final class GuiTestTarget extends GuiBase {
         Draw.card(8, top, lw, bottom - top, Theme.CARD, Theme.BORDER);
         int x = 16;
         Draw.text(fontRendererObj, "Host or IP address", x, 34, Theme.TEXT_DIM);
-        Draw.text(fontRendererObj, "TCP port", x, 64, Theme.TEXT_DIM);
+        Draw.text(fontRendererObj, "Port", x, 64, Theme.TEXT_DIM);
         Draw.text(fontRendererObj, "default 25565", x + 76, 78, Theme.TEXT_FAINT);
-        int y = 34 + 152;
+        int y = 34 + 132;
         if (error != null) {
             y += Draw.wrapped(fontRendererObj, error, x, y, lw - 16, Theme.BAD, 3) + 3;
         }
@@ -259,12 +246,11 @@ public final class GuiTestTarget extends GuiBase {
             Draw.textClipped(fontRendererObj, run.phase, x, y, lw - 16, Theme.TEXT_DIM);
             y += 12;
         }
-        String info = "Connections are opened by this Minecraft process, one every " + nd.settings().intervalMs
-                + " ms (timeout " + nd.settings().tcpTimeoutMs + " ms). Only the host and port above are contacted; "
-                + "no game packets are sent and the server is never joined.";
         if (notice != null) {
             y += Draw.wrapped(fontRendererObj, notice, x, y, lw - 16, Theme.ACCENT, 4) + 4;
         }
+        String info = "Each sample opens a connection from this Minecraft process and does a server-list ping "
+                + "(status + ping/pong), one every " + nd.settings().intervalMs + " ms. The server is never joined.";
         if (y + 20 < bottom) {
             Draw.wrapped(fontRendererObj, info, x, y, lw - 16, Theme.TEXT_FAINT, Math.max(1, (bottom - y - 6) / 9));
         }
@@ -278,20 +264,21 @@ public final class GuiTestTarget extends GuiBase {
     private void drawResults(int x, int y, int w, int h, int mouseX, int mouseY) {
         Draw.text(fontRendererObj, "Results", x, y, Theme.TEXT);
         if (run == null) {
-            Draw.wrapped(fontRendererObj, "Enter a host or IP address and press Start Test (or Enter). "
-                    + "Results show the time to complete a TCP handshake from this Minecraft process, plus a "
-                    + "Minecraft status ping when selected.", x, y + 16, w, Theme.TEXT_DIM, 6);
-            drawExitLagNotice(x, y + h - 20, w);
+            pendingTip = null;
+            Draw.wrapped(fontRendererObj, "Enter a host or IP address and press Start Test (or Enter). The result "
+                    + "is the round trip of a Minecraft ping packet, measured from this game process, so it takes the "
+                    + "same route as your game connection (including ExitLag if it handles Minecraft).",
+                    x, y + 16, w, Theme.TEXT_DIM, 6);
+            drawFooter(x, y + h - 20, w);
             return;
         }
         String state = run.state == TestRun.State.RUNNING ? "Running" : run.state == TestRun.State.QUEUED ? "Queued"
                 : run.state == TestRun.State.DONE ? "Finished" : run.state == TestRun.State.CANCELLED ? "Cancelled"
                 : "Failed";
-        Draw.textRight(fontRendererObj, state + " · " + run.target.display()
-                + (run.resolvedAddress != null && !run.resolvedAddress.equals(run.target.host)
-                ? " → " + run.resolvedAddress + ":" + run.connectPort : ""), x + w, y, Theme.TEXT_FAINT);
-        int cy = y + 14;
-        cy = drawAttemptStrip(x, cy, w, mouseX, mouseY) + 6;
+        Draw.textRight(fontRendererObj, Draw.clip(fontRendererObj, state + " · " + run.target.display()
+                + (run.resolvedAddress != null ? " → " + Conclusions.endpoint(run) : ""), w - 50), x + w, y,
+                Theme.TEXT_FAINT);
+        int cy = drawSampleStrip(x, y + 14, w, mouseX, mouseY) + 6;
 
         StatSummary s = run.summary();
         String[] names = {"Median", "Mean", "Min", "Max", "p95", "p99", "Std dev", "Jitter"};
@@ -305,30 +292,34 @@ public final class GuiTestTarget extends GuiBase {
             Draw.text(fontRendererObj, v, gx, gy + 10, i < 6 ? Theme.latencyColor(vals[i]) : Theme.TEXT);
         }
         cy += 46;
-        int measured = run.measuredAttempts();
-        Draw.text(fontRendererObj, "Successful handshakes: " + s.count + " / " + measured
-                        + (run.failedAttempts() > 0 ? "   Failed: " + Conclusions.failureBreakdown(run) : ""),
-                x, cy, run.failedAttempts() > 0 ? Theme.WARN : Theme.TEXT_DIM);
+        String line = "Successful pings: " + s.count + " / " + run.measuredAttempts();
+        if (run.failedAttempts() > 0) {
+            line += "   Failed: " + Conclusions.failureBreakdown(run);
+        }
+        if (tabPing >= 0) {
+            line += "   Tab-list ping now: " + tabPing + " ms";
+        }
+        Draw.textClipped(fontRendererObj, line, x, cy, w, run.failedAttempts() > 0 ? Theme.WARN : Theme.TEXT_DIM);
         cy += 13;
         int limit = y + h - 24;
-        for (String line : conclusions) {
-            int lh = Draw.wrappedHeight(fontRendererObj, line, w, 4);
+        for (String c : conclusions) {
+            int lh = Draw.wrappedHeight(fontRendererObj, c, w, 4);
             if (cy + lh > limit) {
                 break;
             }
-            Draw.wrapped(fontRendererObj, line, x, cy, w, Theme.TEXT, 4);
+            Draw.wrapped(fontRendererObj, c, x, cy, w, Theme.TEXT, 4);
             cy += lh + 3;
         }
-        drawExitLagNotice(x, y + h - 20, w);
+        drawFooter(x, y + h - 20, w);
     }
 
-    private void drawExitLagNotice(int x, int y, int w) {
-        Draw.textClipped(fontRendererObj, "Origin: this Minecraft JVM (in-process socket)", x, y, w, Theme.TEXT_FAINT);
+    private void drawFooter(int x, int y, int w) {
+        Draw.textClipped(fontRendererObj, "Origin: this Minecraft process (in-process socket)", x, y, w, Theme.TEXT_FAINT);
         Draw.textClipped(fontRendererObj, Conclusions.EXITLAG_NOT_VERIFIED, x, y + 10, w, Theme.WARN);
     }
 
-    /** One bar per attempt: height ∝ RTT for successes, red marker for failures. */
-    private int drawAttemptStrip(int x, int y, int w, int mouseX, int mouseY) {
+    /** One bar per sample: height ∝ ping for successes, red bar for failures. */
+    private int drawSampleStrip(int x, int y, int w, int mouseX, int mouseY) {
         int h = 24;
         Draw.roundRect(x, y, w, h, 3, Theme.FIELD);
         int total = Math.max(1, run.samplesRequested + run.warmupRequested);
@@ -336,7 +327,7 @@ public final class GuiTestTarget extends GuiBase {
         double max = 1;
         for (TestRun.Attempt a : attempts) {
             if (a.outcome == ProbeOutcome.SUCCESS) {
-                max = Math.max(max, a.rttMs);
+                max = Math.max(max, a.pingMs);
             }
         }
         TestRun.Attempt hover = null;
@@ -350,20 +341,23 @@ public final class GuiTestTarget extends GuiBase {
                 hover = a;
             }
             if (a.outcome == ProbeOutcome.SUCCESS) {
-                float bh = (float) (Math.max(2, (h - 4) * a.rttMs / max));
-                int c = a.warmup ? Theme.TEXT_FAINT : Theme.latencyColor(a.rttMs);
-                Draw.rect(bx + 0.5f, y + h - 2 - bh, bx + bw - 0.5f, y + h - 2, c);
+                float bh = (float) Math.max(2, (h - 4) * a.pingMs / max);
+                Draw.rect(bx + 0.5f, y + h - 2 - bh, bx + bw - 0.5f, y + h - 2,
+                        a.warmup ? Theme.TEXT_FAINT : Theme.latencyColor(a.pingMs));
             } else {
                 Draw.rect(bx + 0.5f, y + 2, bx + bw - 0.5f, y + h - 2, Theme.withAlpha(Theme.BAD, 0.75f));
             }
         }
         if (hover != null) {
             List<String> tip = new ArrayList<String>();
-            tip.add((hover.warmup ? "Warm-up" : "Attempt " + hover.index) + ": " + hover.outcome.label);
+            tip.add((hover.warmup ? "Warm-up" : "Sample " + hover.index) + ": " + hover.outcome.label);
             if (hover.outcome == ProbeOutcome.SUCCESS) {
-                tip.add(String.format(Locale.ROOT, "%.2f ms handshake", hover.rttMs));
+                tip.add(String.format(Locale.ROOT, "Ping %.1f ms", hover.pingMs));
             } else if (hover.detail != null) {
                 tip.add(hover.detail);
+            }
+            if (!Double.isNaN(hover.connectMs)) {
+                tip.add(String.format(Locale.ROOT, "TCP connect %.2f ms", hover.connectMs));
             }
             pendingTip = tip;
         } else {
@@ -372,19 +366,10 @@ public final class GuiTestTarget extends GuiBase {
         return y + h;
     }
 
-    private List<String> pendingTip;
-
     @Override
     protected void drawOverlay(int mouseX, int mouseY) {
         if (pendingTip != null) {
             Draw.tooltip(fontRendererObj, pendingTip, mouseX, mouseY, width, height);
         }
-    }
-
-    @Override
-    public void onGuiClosed() {
-        super.onGuiClosed();
-        hostText = hostField.getText();
-        portText = portField.getText();
     }
 }

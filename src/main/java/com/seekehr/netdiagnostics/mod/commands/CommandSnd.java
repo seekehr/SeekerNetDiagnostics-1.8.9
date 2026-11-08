@@ -1,7 +1,6 @@
 package com.seekehr.netdiagnostics.mod.commands;
 
 import com.seekehr.netdiagnostics.core.compare.CompareSession;
-import com.seekehr.netdiagnostics.core.monitor.LatencyMonitor;
 import com.seekehr.netdiagnostics.core.net.Target;
 import com.seekehr.netdiagnostics.core.report.Conclusions;
 import com.seekehr.netdiagnostics.core.stats.StatSummary;
@@ -13,7 +12,6 @@ import com.seekehr.netdiagnostics.gui.GuiTestTarget;
 import com.seekehr.netdiagnostics.mod.Chat;
 import com.seekehr.netdiagnostics.mod.ClientEvents;
 import com.seekehr.netdiagnostics.mod.NetDiag;
-import net.minecraft.client.Minecraft;
 import net.minecraft.command.CommandBase;
 import net.minecraft.command.ICommandSender;
 import net.minecraft.util.BlockPos;
@@ -24,12 +22,11 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * {@code /snd} (aliases {@code /seekernetdiag}, {@code /seekernetdiagnostics}): command-line access to every diagnostic. Registered with Forge's
- * ClientCommandHandler, so it is executed locally and never sent to the server.
+ * {@code /snd} (aliases {@code /seekernetdiag}, {@code /seekernetdiagnostics}). Registered with Forge's
+ * ClientCommandHandler, so it runs locally and is never sent to the server.
  */
 public final class CommandSnd extends CommandBase {
-    private static final String[] SUBS = {"test", "tcp", "monitor", "compare", "export", "settings", "cancel",
-            "history", "help"};
+    private static final String[] SUBS = {"test", "compare", "export", "settings", "cancel", "history", "help"};
 
     @Override
     public String getCommandName() {
@@ -43,7 +40,7 @@ public final class CommandSnd extends CommandBase {
 
     @Override
     public String getCommandUsage(ICommandSender sender) {
-        return "/snd [test|tcp|monitor|compare|export|settings|cancel|history|help]";
+        return "/snd [test|compare|export|settings|cancel|history|help]";
     }
 
     @Override
@@ -61,13 +58,10 @@ public final class CommandSnd extends CommandBase {
         if (args.length == 1) {
             return getListOfStringsMatchingLastWord(args, SUBS);
         }
-        if (args.length == 2 && "monitor".equalsIgnoreCase(args[0])) {
-            return getListOfStringsMatchingLastWord(args, "on", "off", "status", "clear");
-        }
         if (args.length == 2 && "compare".equalsIgnoreCase(args[0])) {
             return getListOfStringsMatchingLastWord(args, "status");
         }
-        if (args.length == 4 && "test".equalsIgnoreCase(args[0])) {
+        if ((args.length == 3 || args.length == 4) && "test".equalsIgnoreCase(args[0])) {
             return getListOfStringsMatchingLastWord(args, "quick", "detailed");
         }
         return null;
@@ -75,7 +69,7 @@ public final class CommandSnd extends CommandBase {
 
     @Override
     public void processCommand(ICommandSender sender, String[] args) {
-        NetDiag nd = NetDiag.get();
+        final NetDiag nd = NetDiag.get();
         if (args.length == 0) {
             ClientEvents.openNextTick(new GuiDashboard(null));
             return;
@@ -83,11 +77,7 @@ public final class CommandSnd extends CommandBase {
         String sub = args[0].toLowerCase(Locale.ROOT);
         try {
             if ("test".equals(sub)) {
-                test(nd, args, TestRun.Kind.FULL);
-            } else if ("tcp".equals(sub)) {
-                test(nd, args, TestRun.Kind.TCP);
-            } else if ("monitor".equals(sub)) {
-                monitor(nd, args);
+                test(nd, args);
             } else if ("compare".equals(sub)) {
                 if (args.length > 1 && "status".equalsIgnoreCase(args[1])) {
                     compareStatus(nd);
@@ -103,9 +93,6 @@ public final class CommandSnd extends CommandBase {
                             Chat.error("Export failed: " + error);
                         } else {
                             Chat.good("Exported " + files.size() + " file(s) to " + nd.reportsDir.getPath());
-                            for (File f : files) {
-                                Chat.info(" - " + f.getName());
-                            }
                         }
                     }
                 });
@@ -128,80 +115,33 @@ public final class CommandSnd extends CommandBase {
     }
 
     private static void help() {
-        Chat.info("SeekerNetDiagnostics commands (all run locally):");
-        Chat.info("/snd (or /seekernetdiag, /seekernetdiagnostics) - open the dashboard");
-        Chat.info("/snd test <host> [port] [quick|detailed] - TCP handshake samples + Minecraft status ping");
-        Chat.info("/snd tcp <host> <port> - TCP handshake samples to one explicit port");
-        Chat.info("/snd monitor [on|off|status|clear] - live connection monitor");
+        Chat.info("SeekerNetDiagnostics (all commands run locally):");
+        Chat.info("/snd - open the dashboard");
+        Chat.info("/snd test <host> [port] [quick|detailed] - repeated Minecraft ping from this game process");
         Chat.info("/snd compare [status] - compare ExitLag routes");
         Chat.info("/snd export - write JSON/CSV reports to config/netscope/reports/");
         Chat.info("/snd settings | /snd cancel | /snd history");
     }
 
-    private static void test(NetDiag nd, String[] args, TestRun.Kind kind) {
+    private static void test(NetDiag nd, String[] args) {
         if (args.length < 2) {
-            if (kind == TestRun.Kind.FULL) {
-                ClientEvents.openNextTick(new GuiTestTarget(null, "", "", false));
-                return;
-            }
-            throw new IllegalArgumentException("Usage: /snd tcp <host> <port>");
+            ClientEvents.openNextTick(new GuiTestTarget(null, "", "", false));
+            return;
         }
-        String port = args.length >= 3 && !isMode(args[2]) ? args[2] : null;
-        if (kind == TestRun.Kind.TCP && port == null && args[1].indexOf(':') < 0) {
-            throw new IllegalArgumentException("Usage: /snd tcp <host> <port> (the port must be given explicitly)");
-        }
+        String port = null;
         boolean detailed = false;
         for (int i = 2; i < args.length; i++) {
             if ("detailed".equalsIgnoreCase(args[i])) {
                 detailed = true;
+            } else if (!"quick".equalsIgnoreCase(args[i])) {
+                port = args[i];
             }
         }
         Target t = Target.parse(args[1], port);
         int samples = detailed ? nd.settings().detailedSamples : nd.settings().quickSamples;
-        TestRun run = nd.startTest(kind, t, samples, null, null, true);
-        Chat.info("Testing " + t.display() + " (" + kind.label + ", " + samples + " samples, one every "
-                + nd.settings().intervalMs + " ms) from this Minecraft process. Results will appear here; "
-                + "/snd cancel to stop.");
-        if (run == null) {
-            Chat.error("Could not start the test.");
-        }
-    }
-
-    private static boolean isMode(String s) {
-        return "quick".equalsIgnoreCase(s) || "detailed".equalsIgnoreCase(s);
-    }
-
-    private static void monitor(NetDiag nd, String[] args) {
-        LatencyMonitor m = nd.monitor;
-        String a = args.length > 1 ? args[1].toLowerCase(Locale.ROOT) : "";
-        if ("off".equals(a)) {
-            m.stop();
-            Chat.info("Live monitor stopped.");
-            return;
-        }
-        if ("clear".equals(a)) {
-            m.clearHistory();
-            Chat.info("Live monitor history cleared.");
-            return;
-        }
-        if ("on".equals(a) || "".equals(a)) {
-            m.start(System.currentTimeMillis());
-        }
-        if ("".equals(a)) {
-            ClientEvents.openNextTick(new GuiDashboard(null));
-        }
-        StatSummary s = m.summary(0);
-        Chat.info("Live monitor: " + (m.active() ? "active" : "stopped") + "; server: "
-                + (m.serverName() == null ? "not connected" : m.serverName())
-                + (m.remoteAddress() == null ? "" : " (" + m.remoteAddress() + ")"));
-        int live = ClientEvents.ownReportedLatency(Minecraft.getMinecraft());
-        Chat.info("Minecraft-reported latency now: " + (live < 0 ? "n/a" : live + " ms")
-                + " (server-computed, smoothed; not raw network RTT)");
-        if (!s.isEmpty()) {
-            Chat.info(String.format(Locale.ROOT, "Session: n=%d min %.0f / avg %.0f / max %.0f ms; p50 %.0f, p95 %.0f, "
-                    + "p99 %.0f ms; jitter %.1f ms; disconnects %d", s.count, s.min, s.mean, s.max, s.median, s.p95,
-                    s.p99, s.jitter, m.disconnects()));
-        }
+        nd.startTest(t, samples, null, null, true);
+        Chat.info("Pinging " + t.display() + " " + samples + " times, one every " + nd.settings().intervalMs
+                + " ms, from this Minecraft process. Results will appear here; /snd cancel to stop.");
     }
 
     private static void compareStatus(NetDiag nd) {
@@ -214,7 +154,7 @@ public final class CommandSnd extends CommandBase {
         Chat.info("Route comparison for " + c.target().display() + ":");
         for (CompareSession.Profile p : ps) {
             StatSummary s = p.summary();
-            Chat.info(" " + p.label + ": " + (s.isEmpty() ? "no successful samples"
+            Chat.info(" " + p.label + ": " + (s.isEmpty() ? "no successful pings"
                     : String.format(Locale.ROOT, "median %.1f ms, p95 %.1f ms, n=%d, failures %d", s.median, s.p95,
                     s.count, p.failures())));
         }
@@ -232,14 +172,10 @@ public final class CommandSnd extends CommandBase {
         Chat.info("Most recent results:");
         for (TestRun r : runs.subList(0, Math.min(8, runs.size()))) {
             StatSummary s = r.summary();
-            Chat.info(" " + r.target.display() + " [" + r.kind.label + "] "
-                    + (s.isEmpty() ? "no successful handshakes (" + Conclusions.failureBreakdown(r) + ")"
+            Chat.info(" " + r.target.display() + (r.profileLabel == null ? "" : " [" + r.profileLabel + "]") + ": "
+                    + (s.isEmpty() ? "no successful pings (" + Conclusions.failureBreakdown(r) + ")"
                     : "median " + Conclusions.fmt(s.median) + ", p95 " + Conclusions.fmt(s.p95) + ", "
                     + s.count + "/" + r.measuredAttempts() + " ok"));
         }
-    }
-
-    static List<String> subs() {
-        return Arrays.asList(SUBS);
     }
 }

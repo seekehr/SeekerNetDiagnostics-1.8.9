@@ -20,7 +20,7 @@ import java.util.Locale;
 
 /**
  * Route comparison workflow. The user changes ExitLag manually between runs; this screen only
- * measures and compares. Runs are TCP-handshake-only so that every profile is measured identically.
+ * measures and compares. Every run uses the same number of Minecraft pings so profiles are comparable.
  */
 public final class GuiCompare extends GuiBase {
     private static final int ID_BASELINE = 1;
@@ -102,7 +102,7 @@ public final class GuiCompare extends GuiBase {
         labelField = field(3, x, 74, w, labelText, "Profile label", 40);
         descField = field(4, x, 106, w, descText, "ExitLag settings, e.g. Manual Singapore, 2 routes", 120);
         button(ID_SAMPLES, x, 128, w, 14, samplesLabel(), FlatButton.Style.GHOST)
-                .tip("Each run uses the same number of TCP handshakes so profiles are comparable.");
+                .tip("Each run uses the same number of pings so profiles are comparable.");
         int bw = (w - 4) / 2;
         button(ID_BASELINE, x, 146, bw, 20, "Start Baseline", FlatButton.Style.PRIMARY)
                 .tip("Measure the current ExitLag configuration and save it as the first profile.");
@@ -171,7 +171,7 @@ public final class GuiCompare extends GuiBase {
     private void startRun(CompareSession.Profile profile) {
         CompareSession s = nd.compareSession();
         try {
-            currentRun = nd.startTest(TestRun.Kind.TCP, s.target(), s.samplesPerRun(), profile.label,
+            currentRun = nd.startTest(s.target(), s.samplesPerRun(), profile.label,
                     profile.exitLagDescription, false);
             currentLabel = profile.label;
             s.recordRun(profile, currentRun);
@@ -291,7 +291,7 @@ public final class GuiCompare extends GuiBase {
 
     private void refresh() {
         long now = System.currentTimeMillis();
-        if (now - lastRefresh < Math.max(250, nd.settings().dashboardRefreshMs)) {
+        if (now - lastRefresh < 250) {
             return;
         }
         lastRefresh = now;
@@ -330,7 +330,7 @@ public final class GuiCompare extends GuiBase {
         int bottom = height - 10;
         Draw.card(8, top, lw, bottom - top, Theme.CARD, Theme.BORDER);
         int x = 16;
-        Draw.text(fontRendererObj, "Target (TCP port)", x, 32, Theme.TEXT_DIM);
+        Draw.text(fontRendererObj, "Server (host and port)", x, 32, Theme.TEXT_DIM);
         Draw.text(fontRendererObj, "Profile label", x, 64, Theme.TEXT_DIM);
         Draw.text(fontRendererObj, "Your ExitLag settings (description)", x, 96, Theme.TEXT_DIM);
         int y = 210;
@@ -365,13 +365,13 @@ public final class GuiCompare extends GuiBase {
         drawTable(rx + 8, top + 7, rw - 16, bottom - 26 - (top + 7));
     }
 
-    private static final String[] ROWS = {"Median RTT", "Mean RTT", "p95", "p99", "Maximum", "Variability (IQR)",
-            "Std deviation", "Successful handshakes", "Timeouts", "Other failures", "Test duration", "Runs"};
+    private static final String[] ROWS = {"Median ping", "Mean ping", "p95", "p99", "Maximum", "Variability (IQR)",
+            "Std deviation", "Successful pings", "Timeouts", "Other failures", "Test duration", "Runs"};
 
     private void drawTable(int x, int y, int w, int h) {
         CompareSession s = nd.compareSession();
         Draw.text(fontRendererObj, s == null ? "Side-by-side comparison" : "Side-by-side: " + s.target().display()
-                + " (TCP handshake)", x, y, Theme.TEXT);
+                + " (Minecraft ping)", x, y, Theme.TEXT);
         if (profiles.isEmpty()) {
             Draw.wrapped(fontRendererObj, "No profiles yet. Results for each ExitLag configuration appear here "
                     + "side by side, with a recommendation that accounts for sample size and overlap.",
@@ -438,12 +438,13 @@ public final class GuiCompare extends GuiBase {
                         v = st.count + " / " + p.attempts();
                         break;
                     case 8:
-                        int to = p.count(ProbeOutcome.TIMEOUT);
+                        int to = p.count(ProbeOutcome.TIMEOUT) + p.count(ProbeOutcome.NO_RESPONSE);
                         v = String.valueOf(to);
                         color = to > 0 ? Theme.WARN : Theme.TEXT;
                         break;
                     case 9:
-                        int other = p.failures() - p.count(ProbeOutcome.TIMEOUT);
+                        int other = p.failures() - p.count(ProbeOutcome.TIMEOUT)
+                                - p.count(ProbeOutcome.NO_RESPONSE);
                         v = String.valueOf(other);
                         color = other > 0 ? Theme.WARN : Theme.TEXT;
                         break;

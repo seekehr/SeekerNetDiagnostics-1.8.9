@@ -26,8 +26,8 @@ public class ProfileComparisonTest {
         assertTrue(c.medianDiff < -3 && c.medianDiff > -5);
         assertTrue(c.ciHigh < 0);
         String rec = c.recommendation("Profile A", "Profile B");
-        assertTrue(rec, rec.matches("Profile B showed a [34]\\.[0-9] ms lower median RTT over 50 successful TCP "
-                + "connections, with similar variability\\."));
+        assertTrue(rec, rec.matches("Profile B showed a [34]\\.[0-9] ms lower median ping over 50 successful pings, "
+                + "with similar variability\\."));
     }
 
     @Test
@@ -90,5 +90,34 @@ public class ProfileComparisonTest {
         }
         assertArrayEquals(new int[]{0, 1, 2, 2, 1, 0}, three);
         assertEquals(0, CompareSession.abbaIndex(5, 1));
+    }
+
+    private static com.seekehr.netdiagnostics.core.test.TestRun run(double... pings) {
+        com.seekehr.netdiagnostics.core.test.TestRun r = new com.seekehr.netdiagnostics.core.test.TestRun(
+                new com.seekehr.netdiagnostics.core.net.Target("10.0.0.1", 25565, true), pings.length, 0, 1000, 5000,
+                null, null);
+        int i = 1;
+        for (double v : pings) {
+            r.addAttempt(new com.seekehr.netdiagnostics.core.test.TestRun.Attempt(i++, false, i,
+                    com.seekehr.netdiagnostics.core.net.ProbeOutcome.SUCCESS, v, 1, v, null));
+        }
+        return r;
+    }
+
+    @Test
+    public void compareSessionPoolsRunsAndSuggestsAbba() {
+        CompareSession s = new CompareSession(new com.seekehr.netdiagnostics.core.net.Target("h", 25565, true), 3);
+        CompareSession.Profile a = s.addProfile("A", "auto");
+        org.junit.Assert.assertNull(s.suggestedNext());
+        s.recordRun(a, run(10, 11, 12));
+        CompareSession.Profile b = s.addProfile("B", "manual SG");
+        s.recordRun(b, run(20, 21, 22));
+        assertEquals("B", s.suggestedNext().label); // A, B done -> B, A next
+        s.recordRun(b, run(20, 20, 20));
+        assertEquals("A", s.suggestedNext().label);
+        assertEquals(6, b.summary().count);
+        assertEquals(20, b.summary().median, 1e-9);
+        assertEquals(a, s.addProfile("a", "dup"));
+        assertEquals(2, s.profiles().size());
     }
 }

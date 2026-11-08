@@ -1,6 +1,6 @@
 package com.seekehr.netdiagnostics.core.report;
 
-import com.seekehr.netdiagnostics.core.mc.McStatusClient;
+import com.seekehr.netdiagnostics.core.mc.McProtocol;
 import com.seekehr.netdiagnostics.core.net.ProbeOutcome;
 import com.seekehr.netdiagnostics.core.stats.StatSummary;
 import com.seekehr.netdiagnostics.core.test.TestRun;
@@ -10,7 +10,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
-/** Generates plain-language conclusions that only claim what the measurements support. */
+/** Plain-language results that only claim what the measurements support. */
 public final class Conclusions {
     public static final String EXITLAG_NOT_VERIFIED =
             "ExitLag routing not verified. Confirm this destination is being optimized in ExitLag's real-time monitor.";
@@ -29,102 +29,96 @@ public final class Conclusions {
         if (s.count < 3) {
             return "unknown (too few samples)";
         }
-        double var = s.jitter;
-        if (var <= 2.5) {
+        if (s.jitter <= 2.5) {
             return "excellent";
         }
-        if (var <= 6) {
+        if (s.jitter <= 6) {
             return "good";
         }
-        if (var <= 15) {
+        if (s.jitter <= 15) {
             return "fair";
         }
         return "unstable";
     }
 
+    public static String endpoint(TestRun run) {
+        String host = run.resolvedAddress != null ? run.resolvedAddress : run.connectHost;
+        return (host.indexOf(':') >= 0 ? "[" + host + "]" : host) + ":" + run.connectPort;
+    }
+
     /** Headline + supporting lines for a finished (or running) run. */
     public static List<String> describe(TestRun run) {
         List<String> out = new ArrayList<String>();
-        StatSummary s = run.summary();
-        String endpoint = (run.resolvedAddress != null ? run.resolvedAddress : run.connectHost) + ":" + run.connectPort;
         if (run.state == TestRun.State.FAILED && run.dns != null && !run.dns.resolved()) {
-            out.add("DNS resolution failed for " + run.connectHost + ". No connection was attempted, so no latency "
-                    + "could be measured.");
+            out.add("DNS resolution failed for " + run.connectHost + ". Nothing was contacted, so no ping could be "
+                    + "measured.");
             return out;
         }
+        StatSummary s = run.summary();
         int measured = run.measuredAttempts();
         if (s.isEmpty()) {
             if (measured == 0) {
-                out.add(run.finished() ? "No TCP handshake samples were collected." : "Waiting for results...");
+                out.add(run.finished() ? "No samples were collected." : "Waiting for results...");
+                return out;
+            }
+            int noPong = run.count(ProbeOutcome.NO_PONG);
+            if (noPong > 0 && noPong == measured) {
+                out.add("The server at " + endpoint(run) + " answered status requests but never answered the ping, so "
+                        + "a ping time cannot be measured. Its status responses took a median of "
+                        + fmt(run.statusSummary().median) + ", which includes server processing time.");
             } else {
-                out.add("No TCP handshake to " + endpoint + " completed (" + failureBreakdown(run) + "). "
-                        + "A valid TCP handshake latency cannot be measured for this destination.");
+                out.add("No Minecraft ping to " + endpoint(run) + " completed (" + failureBreakdown(run) + "). "
+                        + "A valid ping cannot be measured for this destination.");
                 if (run.count(ProbeOutcome.TIMEOUT) > 0) {
-                    out.add("Timeouts mean no reply arrived in time; they do not by themselves prove packet loss. "
-                            + "The port may be filtered, or the server may only accept traffic from certain routes.");
+                    out.add("Connect timeouts mean no reply arrived in time. That alone does not prove packet loss: "
+                            + "the server may be down or filtering connections from your route.");
                 }
-                if (run.count(ProbeOutcome.REFUSED) > 0) {
-                    out.add("'Refused' means the host answered but no service is listening on port "
-                            + run.connectPort + ".");
+                if (run.count(ProbeOutcome.PROTOCOL_ERROR) > 0) {
+                    out.add("The port answered, but not with a Minecraft status response. Check the port number.");
                 }
             }
         } else {
-            String stab = stabilityWord(s);
             out.add(String.format(Locale.ROOT,
-                    "Your connection to the selected TCP endpoint (%s) averaged %s (median %s). Stability was %s, "
-                            + "with %s of RTT variation (jitter) between consecutive handshakes.",
-                    endpoint, fmt(s.mean), fmt(s.median), stab, fmt(s.jitter)));
-            out.add(String.format(Locale.ROOT, "Range %s to %s; 95%% of handshakes completed within %s. Based on %d "
-                    + "successful handshake%s.", fmt(s.min), fmt(s.max), fmt(s.p95), s.count, s.count == 1 ? "" : "s"));
+                    "Your Minecraft ping to %s averaged %s (median %s). Stability was %s, with %s of variation "
+                            + "between consecutive pings.",
+                    endpoint(run), fmt(s.mean), fmt(s.median), stabilityWord(s), fmt(s.jitter)));
+            out.add(String.format(Locale.ROOT, "Range %s to %s; 95%% of pings were within %s. Based on %d "
+                    + "successful ping%s.", fmt(s.min), fmt(s.max), fmt(s.p95), s.count, s.count == 1 ? "" : "s"));
             int failed = run.failedAttempts();
             if (failed > 0) {
-                out.add(failed + " of " + measured + " attempts did not complete (" + failureBreakdown(run)
-                        + "); failed attempts are excluded from the statistics.");
+                out.add(failed + " of " + measured + " samples failed (" + failureBreakdown(run)
+                        + ") and are excluded from the statistics.");
             }
-            out.add("This is TCP connection-setup time, not Minecraft gameplay latency.");
         }
-        McStatusClient.Result st = run.mcStatus;
-        if (st != null) {
-            out.addAll(describeStatus(st));
+        out.add(interceptLine(run));
+        McProtocol.StatusInfo si = run.serverInfo;
+        if (si != null) {
+            StringBuilder b = new StringBuilder("Server reports: ");
+            b.append(si.versionName == null ? "unknown version" : si.versionName);
+            if (si.onlinePlayers >= 0) {
+                b.append(", ").append(si.onlinePlayers).append('/').append(si.maxPlayers).append(" players");
+            }
+            out.add(b.toString());
+        }
+        if (run.protocolNote != null) {
+            out.add(run.protocolNote);
         }
         return out;
     }
 
-    public static List<String> describeStatus(McStatusClient.Result st) {
-        List<String> out = new ArrayList<String>();
-        if (st.tcpOutcome != ProbeOutcome.SUCCESS) {
-            out.add("Minecraft status ping: the TCP connection failed (" + st.tcpOutcome.label + "): " + st.error);
-            return out;
+    /** Explains what the TCP connect time says about local interception, without overclaiming. */
+    public static String interceptLine(TestRun run) {
+        StatSummary c = run.connectSummary();
+        if (c.isEmpty()) {
+            return "No connection was established, so local interception could not be checked.";
         }
-        if (!st.statusOk) {
-            out.add("Minecraft status ping: TCP connection succeeded in " + fmt(st.tcpConnectMs)
-                    + ", but the Minecraft status request failed: " + st.error + ".");
-            return out;
+        if (run.localInterceptDetected()) {
+            return "Connections were accepted locally in about " + fmt(c.median) + ", faster than any remote server "
+                    + "can answer. A local proxy (such as ExitLag) is handling this connection. The ping above is "
+                    + "still measured end to end, but this does not show which route the proxy used.";
         }
-        StringBuilder sb = new StringBuilder("Minecraft status ping (application-level, includes server/proxy "
-                + "processing): ");
-        if (st.pingOk) {
-            sb.append("ping/pong ").append(fmt(st.pingPongMs)).append(", ");
-        }
-        sb.append("status response ").append(fmt(st.statusResponseMs)).append(", TCP connect ")
-                .append(fmt(st.tcpConnectMs)).append('.');
-        out.add(sb.toString());
-        if (!st.pingOk && st.error != null) {
-            out.add("Ping/pong step failed: " + st.error + ".");
-        }
-        if (st.status != null) {
-            StringBuilder s = new StringBuilder("Server reports: ");
-            s.append(st.status.versionName == null ? "unknown version" : st.status.versionName);
-            if (st.status.onlinePlayers >= 0) {
-                s.append(", ").append(st.status.onlinePlayers).append('/').append(st.status.maxPlayers)
-                        .append(" players");
-            }
-            out.add(s.toString());
-        }
-        if (st.protocolNote != null) {
-            out.add(st.protocolNote);
-        }
-        return out;
+        return "No local interception detected (TCP connect " + fmt(c.median) + "). If you expected ExitLag to "
+                + "optimize this server, check ExitLag's real-time monitor.";
     }
 
     public static String failureBreakdown(TestRun run) {
@@ -141,14 +135,14 @@ public final class Conclusions {
         return sb.length() == 0 ? "no failures" : sb.toString();
     }
 
-    /** Concise multi-line summary suitable for the clipboard. */
+    /** Concise multi-line summary for the clipboard. */
     public static String clipboardSummary(TestRun run) {
         StringBuilder sb = new StringBuilder();
         StatSummary s = run.summary();
-        sb.append("SeekerNetDiagnostics - ").append(run.kind.label).append(" test\n");
+        sb.append("SeekerNetDiagnostics - Minecraft ping test\n");
         sb.append("Target: ").append(run.target.display());
         if (run.resolvedAddress != null) {
-            sb.append(" -> ").append(run.resolvedAddress).append(':').append(run.connectPort);
+            sb.append(" -> ").append(endpoint(run));
         }
         sb.append('\n');
         if (run.profileLabel != null) {
@@ -159,19 +153,14 @@ public final class Conclusions {
             sb.append('\n');
         }
         if (s.isEmpty()) {
-            sb.append("TCP handshake: no successful samples (").append(failureBreakdown(run)).append(")\n");
+            sb.append("Ping: no successful samples (").append(failureBreakdown(run)).append(")\n");
         } else {
             sb.append(String.format(Locale.ROOT,
-                    "TCP handshake: n=%d median=%.1f mean=%.1f min=%.1f max=%.1f p95=%.1f p99=%.1f sd=%.1f "
-                            + "jitter=%.1f ms; failures: %s%n",
+                    "Ping: n=%d median=%.1f mean=%.1f min=%.1f max=%.1f p95=%.1f p99=%.1f sd=%.1f jitter=%.1f ms; "
+                            + "failures: %s%n",
                     s.count, s.median, s.mean, s.min, s.max, s.p95, s.p99, s.stdDev, s.jitter, failureBreakdown(run)));
         }
-        McStatusClient.Result st = run.mcStatus;
-        if (st != null) {
-            for (String line : describeStatus(st)) {
-                sb.append(line).append('\n');
-            }
-        }
+        sb.append(interceptLine(run)).append('\n');
         sb.append("Origin: Minecraft client JVM. ").append(EXITLAG_NOT_VERIFIED);
         return sb.toString();
     }

@@ -1,13 +1,8 @@
 package com.seekehr.netdiagnostics.core.dns;
 
-import java.net.DatagramPacket;
-import java.net.DatagramSocket;
 import java.net.Inet4Address;
 import java.net.InetAddress;
-import java.net.InetSocketAddress;
-import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
-import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Hashtable;
@@ -15,21 +10,28 @@ import java.util.List;
 import java.util.regex.Pattern;
 
 /**
- * DNS resolution for diagnostics. Must only be called from worker threads (it blocks).
- *
- * <p>Addresses always come from the operating-system resolver ({@link InetAddress}) because that is
- * what Minecraft itself uses. A supplementary direct UDP query to the system's configured DNS server
- * is attempted only to obtain record TTLs and SRV records; if it fails the TTL is reported as not
- * obtainable instead of guessed.</p>
+ * Resolves targets the same way Minecraft 1.8.9 does: SRV records through the JNDI DNS provider and
+ * addresses through the operating-system resolver ({@link InetAddress}). Blocking; worker threads only.
  */
 public final class DnsResolver {
     private static final Pattern IPV4 = Pattern.compile("^(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})$");
-    private static final SecureRandom RANDOM = new SecureRandom();
 
-    private final int directTimeoutMs;
+    private DnsResolver() {
+    }
 
-    public DnsResolver(int directTimeoutMs) {
-        this.directTimeoutMs = Math.max(250, directTimeoutMs);
+    /** An SRV answer. */
+    public static final class Srv {
+        public final String target;
+        public final int port;
+        public final int priority;
+        public final int weight;
+
+        public Srv(String target, int port, int priority, int weight) {
+            this.target = target;
+            this.port = port;
+            this.priority = priority;
+            this.weight = weight;
+        }
     }
 
     public static boolean isIpLiteral(String host) {
@@ -47,8 +49,33 @@ public final class DnsResolver {
         return host.indexOf(':') >= 0 && host.matches("^[0-9A-Fa-f:.%a-zA-Z0-9]+$");
     }
 
-    /** Resolve {@code host} and fill timing, addresses and (where obtainable) TTL information. */
-    public DnsInfo resolve(String host, boolean preferIpv4) {
+    /**
+     * True for addresses that can legitimately answer a TCP handshake in under a millisecond:
+     * loopback, link-local, site-local (private LAN), CGNAT and unique-local IPv6.
+     */
+    public static boolean isLocalOrPrivate(String ip) {
+        if (ip == null || !isIpLiteral(ip)) {
+            return false;
+        }
+        try {
+            InetAddress a = InetAddress.getByName(ip); // literal: no lookup
+            if (a.isLoopbackAddress() || a.isLinkLocalAddress() || a.isSiteLocalAddress() || a.isAnyLocalAddress()) {
+                return true;
+            }
+            byte[] b = a.getAddress();
+            if (b.length == 4) {
+                int o0 = b[0] & 0xff;
+                int o1 = b[1] & 0xff;
+                return o0 == 100 && o1 >= 64 && o1 <= 127; // 100.64.0.0/10 (CGNAT)
+            }
+            return (b[0] & 0xfe) == 0xfc; // fc00::/7
+        } catch (UnknownHostException e) {
+            return false;
+        }
+    }
+
+    /** Resolve {@code host} with the OS resolver, timing the lookup. */
+    public static DnsInfo resolve(String host, boolean preferIpv4) {
         DnsInfo info = new DnsInfo();
         info.query = host;
         info.ipLiteral = isIpLiteral(host);
@@ -57,14 +84,14 @@ public final class DnsResolver {
         try {
             all = InetAddress.getAllByName(host);
         } catch (UnknownHostException e) {
-            info.systemLookupMs = (System.nanoTime() - t0) / 1e6;
+            info.lookupMs = (System.nanoTime() - t0) / 1e6;
             info.error = "DNS resolution failed: host '" + host + "' could not be resolved";
             return info;
         } catch (SecurityException e) {
             info.error = "DNS resolution blocked: " + e.getMessage();
             return info;
         }
-        info.systemLookupMs = (System.nanoTime() - t0) / 1e6;
+        info.lookupMs = (System.nanoTime() - t0) / 1e6;
         List<InetAddress> ordered = new ArrayList<InetAddress>();
         Collections.addAll(ordered, all);
         if (preferIpv4) {
@@ -80,78 +107,14 @@ public final class DnsResolver {
         for (InetAddress a : ordered) {
             info.addresses.add(a.getHostAddress());
         }
-        if (info.ipLiteral) {
-            info.notes.add("Target is an IP address; no DNS lookup was needed.");
-            return info;
-        }
-        info.notes.add("Lookup time is from the operating-system resolver and may reflect a cached answer.");
-        directLookup(host, info);
         return info;
     }
 
-    private void directLookup(String host, DnsInfo info) {
-        List<InetAddress> servers = systemNameservers();
-        if (servers.isEmpty()) {
-            info.notes.add("TTL not obtainable: the system DNS server list is not accessible from Java.");
-            return;
-        }
-        long minTtl = Long.MAX_VALUE;
-        boolean any = false;
-        long t0 = System.nanoTime();
-        for (int type : new int[]{DnsMessage.TYPE_A, DnsMessage.TYPE_AAAA}) {
-            DirectResult r = query(servers, host, type);
-            if (r == null) {
-                continue;
-            }
-            info.directServer = r.server.getHostAddress();
-            for (DnsMessage.Record rec : r.response.answers) {
-                info.directRecords.add(rec.toString());
-                if (rec.type == DnsMessage.TYPE_A || rec.type == DnsMessage.TYPE_AAAA) {
-                    minTtl = Math.min(minTtl, rec.ttl);
-                    any = true;
-                }
-            }
-        }
-        info.directQueryMs = (System.nanoTime() - t0) / 1e6;
-        if (any) {
-            info.minTtlSeconds = minTtl;
-        } else {
-            info.notes.add("TTL not obtainable: direct DNS query returned no address records.");
-        }
-    }
-
-    /** Looks up {@code _minecraft._tcp.<host>}. Returns null when no SRV record exists or lookup fails. */
-    public DnsMessage.Record lookupMinecraftSrv(String host) {
+    /** Looks up {@code _minecraft._tcp.<host>} like the vanilla client. Returns null if there is none. */
+    public static Srv lookupMinecraftSrv(String host) {
         if (isIpLiteral(host)) {
             return null;
         }
-        String name = "_minecraft._tcp." + host;
-        DirectResult r = query(systemNameservers(), name, DnsMessage.TYPE_SRV);
-        if (r != null) {
-            List<DnsMessage.Record> srv = r.response.ofType(DnsMessage.TYPE_SRV);
-            if (!srv.isEmpty()) {
-                return lowestPriority(srv);
-            }
-            if (r.response.rcode == 0 || r.response.rcode == 3) {
-                return null; // authoritative "no SRV"
-            }
-        }
-        return jndiSrv(name);
-    }
-
-    static DnsMessage.Record lowestPriority(List<DnsMessage.Record> srv) {
-        DnsMessage.Record best = null;
-        for (DnsMessage.Record rec : srv) {
-            if (best == null || rec.priority < best.priority
-                    || (rec.priority == best.priority && rec.weight > best.weight)) {
-                best = rec;
-            }
-        }
-        return best;
-    }
-
-    /** Same mechanism Minecraft 1.8.9 uses for SRV lookups (JNDI DNS provider). TTL is unknown. */
-    private static DnsMessage.Record jndiSrv(String name) {
         try {
             Hashtable<String, String> env = new Hashtable<String, String>();
             env.put("java.naming.factory.initial", "com.sun.jndi.dns.DnsContextFactory");
@@ -160,100 +123,54 @@ public final class DnsResolver {
             env.put("com.sun.jndi.dns.timeout.retries", "1");
             javax.naming.directory.DirContext ctx = new javax.naming.directory.InitialDirContext(env);
             try {
-                javax.naming.directory.Attributes attrs = ctx.getAttributes(name, new String[]{"SRV"});
+                javax.naming.directory.Attributes attrs = ctx.getAttributes("_minecraft._tcp." + host,
+                        new String[]{"SRV"});
                 javax.naming.directory.Attribute a = attrs.get("srv");
-                if (a == null || a.size() == 0) {
+                if (a == null) {
                     return null;
                 }
-                String[] parts = a.get(0).toString().split(" ");
-                if (parts.length < 4) {
-                    return null;
+                List<Srv> list = new ArrayList<Srv>();
+                for (int i = 0; i < a.size(); i++) {
+                    Srv s = parseSrv(String.valueOf(a.get(i)));
+                    if (s != null) {
+                        list.add(s);
+                    }
                 }
-                String target = parts[3].endsWith(".") ? parts[3].substring(0, parts[3].length() - 1) : parts[3];
-                return new DnsMessage.Record(name, DnsMessage.TYPE_SRV, -1, target,
-                        Integer.parseInt(parts[0]), Integer.parseInt(parts[1]), Integer.parseInt(parts[2]));
+                return best(list);
             } finally {
                 ctx.close();
             }
         } catch (Throwable t) {
+            return null; // NXDOMAIN, no SRV, or DNS unavailable: use the host as given
+        }
+    }
+
+    /** Parses JNDI SRV text: "priority weight port target." */
+    static Srv parseSrv(String text) {
+        String[] p = text.trim().split("\\s+");
+        if (p.length < 4) {
+            return null;
+        }
+        try {
+            String target = p[3].endsWith(".") ? p[3].substring(0, p[3].length() - 1) : p[3];
+            int port = Integer.parseInt(p[2]);
+            if (target.isEmpty() || port < 1 || port > 65535) {
+                return null;
+            }
+            return new Srv(target, port, Integer.parseInt(p[0]), Integer.parseInt(p[1]));
+        } catch (NumberFormatException e) {
             return null;
         }
     }
 
-    private static final class DirectResult {
-        final InetAddress server;
-        final DnsMessage.Response response;
-
-        DirectResult(InetAddress server, DnsMessage.Response response) {
-            this.server = server;
-            this.response = response;
-        }
-    }
-
-    private DirectResult query(List<InetAddress> servers, String name, int type) {
-        for (InetAddress server : servers) {
-            DatagramSocket socket = null;
-            try {
-                socket = new DatagramSocket();
-                socket.setSoTimeout(directTimeoutMs);
-                int id = RANDOM.nextInt(0x10000);
-                byte[] q = DnsMessage.buildQuery(id, name, type);
-                socket.send(new DatagramPacket(q, q.length, new InetSocketAddress(server, 53)));
-                byte[] buf = new byte[4096];
-                long deadline = System.currentTimeMillis() + directTimeoutMs;
-                while (true) {
-                    DatagramPacket p = new DatagramPacket(buf, buf.length);
-                    socket.receive(p);
-                    if (!server.equals(p.getAddress()) || p.getPort() != 53) {
-                        if (System.currentTimeMillis() > deadline) {
-                            break;
-                        }
-                        continue; // ignore unrelated datagrams
-                    }
-                    DnsMessage.Response resp = DnsMessage.parse(buf, p.getLength());
-                    if (resp.id != id) {
-                        if (System.currentTimeMillis() > deadline) {
-                            break;
-                        }
-                        continue;
-                    }
-                    return new DirectResult(server, resp);
-                }
-            } catch (SocketTimeoutException e) {
-                // try next server
-            } catch (Exception e) {
-                // malformed reply, unreachable server etc. - try next server
-            } finally {
-                if (socket != null) {
-                    socket.close();
-                }
+    /** Lowest priority wins; ties go to the highest weight. */
+    static Srv best(List<Srv> list) {
+        Srv best = null;
+        for (Srv s : list) {
+            if (best == null || s.priority < best.priority || (s.priority == best.priority && s.weight > best.weight)) {
+                best = s;
             }
         }
-        return null;
-    }
-
-    /**
-     * System DNS servers via the JDK-internal resolver configuration (present in Java 8 on Windows,
-     * Linux and macOS). Returns an empty list if unavailable.
-     */
-    @SuppressWarnings("unchecked")
-    public static List<InetAddress> systemNameservers() {
-        List<InetAddress> out = new ArrayList<InetAddress>();
-        try {
-            Class<?> c = Class.forName("sun.net.dns.ResolverConfiguration");
-            Object conf = c.getMethod("open").invoke(null);
-            List<String> ns = (List<String>) c.getMethod("nameservers").invoke(conf);
-            for (String s : ns) {
-                if (isIpLiteral(s)) {
-                    out.add(InetAddress.getByName(s));
-                }
-                if (out.size() >= 3) {
-                    break;
-                }
-            }
-        } catch (Throwable ignored) {
-            // not available on this JVM
-        }
-        return out;
+        return best;
     }
 }

@@ -98,51 +98,6 @@ public final class Draw {
         rect(x + w - 1, y, x + w, y + h, color);
     }
 
-    /** Polyline from parallel coordinate arrays (first n points). */
-    public static void lineStrip(float[] xs, float[] ys, int n, float width, int color) {
-        if (n < 2) {
-            return;
-        }
-        begin(color);
-        GL11.glEnable(GL11.GL_LINE_SMOOTH);
-        GL11.glHint(GL11.GL_LINE_SMOOTH_HINT, GL11.GL_NICEST);
-        GL11.glLineWidth(width);
-        WorldRenderer wr = Tessellator.getInstance().getWorldRenderer();
-        wr.begin(GL11.GL_LINE_STRIP, DefaultVertexFormats.POSITION);
-        for (int i = 0; i < n; i++) {
-            wr.pos(xs[i], ys[i], 0).endVertex();
-        }
-        Tessellator.getInstance().draw();
-        GL11.glLineWidth(1f);
-        GL11.glDisable(GL11.GL_LINE_SMOOTH);
-        end();
-    }
-
-    /** Filled area under a polyline down to baseline y (vertical gradient from top colour to transparent). */
-    public static void area(float[] xs, float[] ys, int n, float baseY, int topColor) {
-        if (n < 2) {
-            return;
-        }
-        GlStateManager.disableTexture2D();
-        GlStateManager.enableBlend();
-        GlStateManager.tryBlendFuncSeparate(770, 771, 1, 0);
-        GlStateManager.shadeModel(GL11.GL_SMOOTH);
-        WorldRenderer wr = Tessellator.getInstance().getWorldRenderer();
-        wr.begin(GL11.GL_QUAD_STRIP, DefaultVertexFormats.POSITION_COLOR);
-        int a = (topColor >>> 24) & 0xFF;
-        int r = (topColor >>> 16) & 0xFF;
-        int g = (topColor >>> 8) & 0xFF;
-        int b = topColor & 0xFF;
-        for (int i = 0; i < n; i++) {
-            wr.pos(xs[i], ys[i], 0).color(r, g, b, a).endVertex();
-            wr.pos(xs[i], baseY, 0).color(r, g, b, 0).endVertex();
-        }
-        Tessellator.getInstance().draw();
-        GlStateManager.shadeModel(GL11.GL_FLAT);
-        GlStateManager.disableBlend();
-        GlStateManager.enableTexture2D();
-    }
-
     private static void begin(int color) {
         GlStateManager.enableBlend();
         GlStateManager.disableTexture2D();
