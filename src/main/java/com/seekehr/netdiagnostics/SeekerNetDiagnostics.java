@@ -22,7 +22,7 @@ import java.io.File;
 public class SeekerNetDiagnostics {
     public static final String MODID = "seekernetdiagnostics";
     public static final String NAME = "SeekerNetDiagnostics";
-    public static final String VERSION = "1.0.0";
+    public static final String VERSION = "1.0.1";
 
     @Mod.EventHandler
     public void preInit(FMLPreInitializationEvent event) {
