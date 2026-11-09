@@ -39,7 +39,9 @@ public final class ClientEvents {
         }
         int w = event.resolution.getScaledWidth();
         int h = event.resolution.getScaledHeight();
-        PingHud.draw(mc.fontRendererObj, PingHud.clampX(HudConfig.x, w, mc.fontRendererObj),
-                PingHud.clampY(HudConfig.y, h, mc.fontRendererObj), m.snapshot());
+        PingMonitor.Snapshot s = m.snapshot();
+        int[] size = PingHud.size(mc.fontRendererObj, s);
+        PingHud.draw(mc.fontRendererObj, PingHud.clampX(HudConfig.x, size[0], w),
+                PingHud.clampY(HudConfig.y, size[1], h), s);
     }
 }

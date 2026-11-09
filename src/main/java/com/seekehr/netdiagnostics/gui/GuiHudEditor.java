@@ -9,9 +9,12 @@ import net.minecraft.client.gui.GuiScreen;
 
 import java.io.IOException;
 
-/** Drag the ping HUD to a new spot, turn it on/off, and choose whether pinging starts on its own. Saves at once. */
+/**
+ * Drag the ping HUD to a new spot, turn it on/off, choose whether pinging starts on its own, and open the HUD
+ * settings. Saves at once.
+ */
 public final class GuiHudEditor extends GuiScreen {
-    private static final int B_TOGGLE = 0, B_RESET = 1, B_DONE = 2, B_AUTO = 3;
+    private static final int B_TOGGLE = 0, B_RESET = 1, B_DONE = 2, B_AUTO = 3, B_SETTINGS = 4;
 
     private FlatButton toggle;
     private FlatButton auto;
@@ -22,8 +25,8 @@ public final class GuiHudEditor extends GuiScreen {
     @Override
     public void initGui() {
         buttonList.clear();
-        int bw = 90;
-        int x = width / 2 - (bw * 4 + 12) / 2;
+        int bw = Math.min(90, (width - 20 - 16) / 5);
+        int x = width / 2 - (bw * 5 + 16) / 2;
         int y = height / 2 + 26;
         toggle = new FlatButton(B_TOGGLE, x, y, bw, 16, "", FlatButton.Style.NORMAL);
         buttonList.add(toggle);
@@ -32,7 +35,9 @@ public final class GuiHudEditor extends GuiScreen {
                 + "Off: the HUD shows only while /snd is monitoring.");
         buttonList.add(auto);
         buttonList.add(new FlatButton(B_RESET, x + (bw + 4) * 2, y, bw, 16, "Reset position", FlatButton.Style.NORMAL));
-        buttonList.add(new FlatButton(B_DONE, x + (bw + 4) * 3, y, bw, 16, "Done", FlatButton.Style.PRIMARY));
+        buttonList.add(new FlatButton(B_SETTINGS, x + (bw + 4) * 3, y, bw, 16, "Settings", FlatButton.Style.NORMAL)
+                .tip("Pick extra stats (min, max, average, jitter, loss...) and change the HUD's style, colour and size."));
+        buttonList.add(new FlatButton(B_DONE, x + (bw + 4) * 4, y, bw, 16, "Done", FlatButton.Style.PRIMARY));
         clampPosition();
         refresh();
     }
@@ -45,8 +50,15 @@ public final class GuiHudEditor extends GuiScreen {
     }
 
     private void clampPosition() {
-        HudConfig.x = PingHud.clampX(HudConfig.x, width, fontRendererObj);
-        HudConfig.y = PingHud.clampY(HudConfig.y, height, fontRendererObj);
+        int[] size = PingHud.size(fontRendererObj, snap());
+        HudConfig.x = PingHud.clampX(HudConfig.x, size[0], width);
+        HudConfig.y = PingHud.clampY(HudConfig.y, size[1], height);
+    }
+
+    /** Live data while monitoring, else null (the HUD then shows sample values). */
+    static PingMonitor.Snapshot snap() {
+        PingMonitor m = NetDiag.monitor();
+        return m != null && !m.stopped() && !m.snapshot().samples.isEmpty() ? m.snapshot() : null;
     }
 
     @Override
@@ -62,18 +74,18 @@ public final class GuiHudEditor extends GuiScreen {
                 Theme.TEXT_FAINT);
         Draw.textCentered(fontRendererObj, hint(), width / 2f, height / 2f + 10, Theme.TEXT_DIM);
 
-        int w = PingHud.previewWidth(fontRendererObj);
-        int h = fontRendererObj.FONT_HEIGHT;
+        clampPosition(); // the size changes as live values change
+        PingMonitor.Snapshot s = snap();
+        int[] size = PingHud.size(fontRendererObj, s);
+        int w = size[0];
+        int h = size[1];
         boolean over = inside(mouseX, mouseY);
         int border = dragging ? Theme.ACCENT : over ? Theme.FOCUS : Theme.BORDER;
-        Draw.rect(HudConfig.x - 2, HudConfig.y - 2, HudConfig.x + w + 2, HudConfig.y + h + 1, 0x80000000);
-        Draw.outline(HudConfig.x - 2, HudConfig.y - 2, w + 4, h + 3, border);
-        PingMonitor m = NetDiag.monitor();
-        PingHud.draw(fontRendererObj, HudConfig.x, HudConfig.y,
-                m != null && !m.stopped() && !m.snapshot().samples.isEmpty() ? m.snapshot() : null);
+        Draw.outline(HudConfig.x - 2, HudConfig.y - 2, w + 4, h + 4, border);
+        PingHud.draw(fontRendererObj, HudConfig.x, HudConfig.y, s);
         if (!HudConfig.enabled) {
-            Draw.rect(HudConfig.x - 2, HudConfig.y - 2, HudConfig.x + w + 2, HudConfig.y + h + 1, 0xA0000000);
-            Draw.textCentered(fontRendererObj, "hidden", HudConfig.x + w / 2f, HudConfig.y, Theme.BAD);
+            Draw.rect(HudConfig.x - 1, HudConfig.y - 1, HudConfig.x + w + 1, HudConfig.y + h + 1, 0xA0000000);
+            Draw.textCentered(fontRendererObj, "hidden", HudConfig.x + w / 2f, HudConfig.y + (h - 8) / 2f, Theme.BAD);
         }
         super.drawScreen(mouseX, mouseY, partialTicks);
     }
@@ -94,9 +106,9 @@ public final class GuiHudEditor extends GuiScreen {
     }
 
     private boolean inside(int mx, int my) {
-        int w = PingHud.previewWidth(fontRendererObj);
-        return mx >= HudConfig.x - 2 && mx < HudConfig.x + w + 2
-                && my >= HudConfig.y - 2 && my < HudConfig.y + fontRendererObj.FONT_HEIGHT + 1;
+        int[] size = PingHud.size(fontRendererObj, snap());
+        return mx >= HudConfig.x - 2 && mx < HudConfig.x + size[0] + 2
+                && my >= HudConfig.y - 2 && my < HudConfig.y + size[1] + 2;
     }
 
     @Override
@@ -142,6 +154,8 @@ public final class GuiHudEditor extends GuiScreen {
             HudConfig.x = HudConfig.DEFAULT_X;
             HudConfig.y = HudConfig.DEFAULT_Y;
             HudConfig.save();
+        } else if (b.id == B_SETTINGS) {
+            mc.displayGuiScreen(new GuiHudSettings(this));
         } else if (b.id == B_DONE) {
             mc.displayGuiScreen(null);
         }

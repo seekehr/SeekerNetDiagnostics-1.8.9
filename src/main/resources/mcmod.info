@@ -2,7 +2,7 @@
 {
   "modid": "seekernetdiagnostics",
   "name": "SeekerNetDiagnostics",
-  "description": "In-game ping monitor: live Minecraft ping graph and stats, connection route info and traceroute. Never modifies game packets.",
+  "description": "In-game ping monitor: live Minecraft ping graph and stats, connection route info and traceroute for game proxies like ExitLag. Never modifies game packets.",
   "version": "${version}",
   "mcversion": "${mcversion}",
   "url": "",

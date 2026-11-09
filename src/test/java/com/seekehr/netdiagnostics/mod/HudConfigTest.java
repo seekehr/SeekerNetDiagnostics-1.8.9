@@ -46,6 +46,16 @@ public class HudConfigTest {
         HudConfig.advancedTracing = true;
         HudConfig.traceIntervalSec = 15;
         HudConfig.traceTab = true;
+        HudConfig.style = PingHud.STYLE_BAR;
+        HudConfig.textColor = 3;
+        HudConfig.latencyColors = true;
+        HudConfig.shadow = true;
+        HudConfig.bgOpacity = 85;
+        HudConfig.scalePercent = 150;
+        HudConfig.stacked = true;
+        HudConfig.showMin = true;
+        HudConfig.showMax = true;
+        HudConfig.showTabPing = true;
         HudConfig.save();
 
         // simulate a game restart: reset the fields, then load the same file
@@ -57,6 +67,10 @@ public class HudConfigTest {
         HudConfig.advancedTracing = false;
         HudConfig.traceIntervalSec = 60;
         HudConfig.traceTab = false;
+        HudConfig.resetStyle();
+        HudConfig.showMin = false;
+        HudConfig.showMax = false;
+        HudConfig.showTabPing = false;
         HudConfig.load(f);
 
         assertFalse(HudConfig.enabled);
@@ -67,6 +81,17 @@ public class HudConfigTest {
         assertTrue(HudConfig.advancedTracing);
         assertEquals(15, HudConfig.traceIntervalSec);
         assertTrue(HudConfig.traceTab);
+        assertEquals(PingHud.STYLE_BAR, HudConfig.style);
+        assertEquals(3, HudConfig.textColor);
+        assertTrue(HudConfig.latencyColors);
+        assertTrue(HudConfig.shadow);
+        assertEquals(85, HudConfig.bgOpacity);
+        assertEquals(150, HudConfig.scalePercent);
+        assertTrue(HudConfig.stacked);
+        assertTrue(HudConfig.showMin);
+        assertTrue(HudConfig.showMax);
+        assertTrue(HudConfig.showTabPing);
+        assertFalse(HudConfig.showAvg);
     }
 
     @Test
@@ -79,5 +104,20 @@ public class HudConfigTest {
         HudConfig.load(f);
         assertEquals(1000, HudConfig.pingIntervalMs);
         assertEquals(60, HudConfig.traceIntervalSec);
+    }
+
+    @Test
+    public void invalidHudStyleValuesFallBackToDefaults() throws Exception {
+        File f = File.createTempFile("snd", ".cfg");
+        f.deleteOnExit();
+        Writer w = new OutputStreamWriter(new FileOutputStream(f), "UTF-8");
+        w.write("hud {\n    style {\n        I:style=99\n        I:textColor=42\n        I:backgroundOpacity=33\n"
+                + "        I:scalePercent=110\n    }\n}\n");
+        w.close();
+        HudConfig.load(f);
+        assertEquals(PingHud.STYLE_BOX, HudConfig.style);
+        assertEquals(0, HudConfig.textColor);
+        assertEquals(HudConfig.DEFAULT_BG_OPACITY, HudConfig.bgOpacity);
+        assertEquals(100, HudConfig.scalePercent);
     }
 }

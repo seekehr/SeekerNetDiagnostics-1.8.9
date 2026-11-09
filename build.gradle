@@ -15,7 +15,7 @@ buildscript {
 
 apply plugin: 'net.minecraftforge.gradle.forge'
 
-version = "2.0.0"
+version = "1.0.0"
 group = "com.seekehr.netdiagnostics"
 archivesBaseName = "SeekerNetDiagnostics-1.8.9"
 
@@ -50,6 +50,12 @@ dependencies {
     // the main (implementation/compile) configuration because runtime-only is broken there.
     // ForgeGradle 2.1 does not shade dependencies, so DevAuth is NOT packaged into the release JAR.
     compile 'me.djtheredstoner:DevAuth-forge-legacy:1.2.2'
+}
+
+// Keep the mod version (used in mcmod.info) but leave it out of the built JAR's file name:
+// build/libs/SeekerNetDiagnostics-1.8.9.jar instead of SeekerNetDiagnostics-1.8.9-2.0.0.jar.
+jar {
+    version = null
 }
 
 test {

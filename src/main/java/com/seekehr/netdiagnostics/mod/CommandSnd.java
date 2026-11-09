@@ -61,7 +61,7 @@ public final class CommandSnd extends CommandBase {
         if ("help".equals(sub)) {
             Chat.info("/snd - monitor the server you're on");
             Chat.info("/snd <host> [port] - monitor another server");
-            Chat.info("/snd hud - drag the ping HUD or turn it on/off");
+            Chat.info("/snd hud - move the ping HUD, turn it on/off, or change its stats and style");
             Chat.info("/snd stop - stop pinging (until you join another server)");
             Chat.info("/snd help - show this list");
             return;
