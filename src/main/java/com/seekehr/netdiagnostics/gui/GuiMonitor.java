@@ -1,10 +1,14 @@
 package com.seekehr.netdiagnostics.gui;
 
 import com.seekehr.netdiagnostics.core.dns.AsnLookup;
+import com.seekehr.netdiagnostics.core.dns.ProxyDetector;
 import com.seekehr.netdiagnostics.core.mc.McProtocol;
 import com.seekehr.netdiagnostics.core.monitor.PingMonitor;
 import com.seekehr.netdiagnostics.core.monitor.Traceroute;
 import com.seekehr.netdiagnostics.core.stats.StatSummary;
+import com.seekehr.netdiagnostics.helper.HelperClient;
+import com.seekehr.netdiagnostics.helper.Snapshot;
+import com.seekehr.netdiagnostics.mod.AdvancedTracing;
 import com.seekehr.netdiagnostics.mod.NetDiag;
 import net.minecraft.client.gui.GuiButton;
 import net.minecraft.client.gui.GuiScreen;
@@ -14,16 +18,21 @@ import org.lwjgl.input.Mouse;
 import org.lwjgl.opengl.GL11;
 
 import java.io.IOException;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 
 /** The whole UI: live ping graph, statistics, the connection route and a system traceroute. */
 public final class GuiMonitor extends GuiBase {
     private static final int B_PAUSE = 0, B_INTERVAL = 1, B_RESET = 2, B_TRACE = 3, B_COPY = 4, B_CLOSE = 5;
-    private static final int B_TAB_ROUTE = 10, B_TAB_TRACE = 11;
+    private static final int B_TAB_ROUTE = 10, B_TAB_TRACE = 11, B_ADV = 12;
+    /** Height taken by the Advanced Tracing checkbox at the top of the Traceroute tab. */
+    private static final int ADV_H = 16;
     private static final int TILE_H = 22;
     private static final int ROW_H = 10;
+    private static final String PROXY_PREFIX = "USING PROXY: ";
     /** A 0 ms tab-list ping is never real: not reported yet, or faked by the server/proxy. Ignored in comparisons. */
     private static final String TAB_ZERO = "0 ms (not reported or faked, ignored)";
 
@@ -33,6 +42,7 @@ public final class GuiMonitor extends GuiBase {
     private FlatButton interval;
     private FlatButton tabRoute;
     private FlatButton tabTrace;
+    private FlatButton adv;
     private int lw;
     private int rx;
     private int rw;
@@ -70,14 +80,21 @@ public final class GuiMonitor extends GuiBase {
                 .tip("Time between pings. Each ping is a new connection; never faster than 0.5 s.");
         button(B_RESET, 8 + (bw + 4) * 2, by, bw, 14, "Reset", FlatButton.Style.NORMAL).tip("Clear samples and stats (R)");
         button(B_TRACE, 8 + (bw + 4) * 3, by, bw, 14, "Trace route", FlatButton.Style.NORMAL)
-                .tip("Run the system traceroute to the server IP (T). It uses ICMP, which ExitLag does not route, "
-                        + "so it shows your normal ISP path.");
+                .tip("Trace the route to the server (T): TCP probes on the game port check whether ExitLag or "
+                        + "another local proxy carries it, and the system traceroute (ICMP) lists the routers of your "
+                        + "normal ISP path.");
         button(B_COPY, 8 + (bw + 4) * 4, by, bw, 14, "Copy", FlatButton.Style.NORMAL).tip("Copy a text summary (C)");
         button(B_CLOSE, 8 + (bw + 4) * 5, by, bw, 14, "Close", FlatButton.Style.GHOST)
                 .tip("Close. Pinging continues in the background with a HUD; /snd stop to end it.");
         int tw = (rw - 4) / 2;
         tabRoute = button(B_TAB_ROUTE, rx, top, tw, 14, "Route", FlatButton.Style.TAB);
         tabTrace = button(B_TAB_TRACE, rx + tw + 4, top, rw - tw - 4, 14, "Traceroute", FlatButton.Style.TAB);
+        adv = button(B_ADV, rx + 5, top + 18 + 4, rw - 10, 12, "", FlatButton.Style.NORMAL)
+                .tip("Starts a separate helper with administrator rights (Windows asks through UAC; Minecraft itself "
+                        + "is not elevated). It captures packets to find the relays ExitLag really uses, traces the "
+                        + "routers to them, and watches for route changes. While it runs, it adds a temporary Windows "
+                        + "Firewall rule so that Java can receive ICMP error replies (types 3 and 11 only); the rule is "
+                        + "removed when it stops. Hops inside ExitLag's tunnel are never shown: they cannot be seen.");
         refreshButtons();
     }
 
@@ -89,6 +106,9 @@ public final class GuiMonitor extends GuiBase {
         interval.enabled = !dead;
         tabRoute.style = traceTab ? FlatButton.Style.TAB : FlatButton.Style.TAB_ACTIVE;
         tabTrace.style = traceTab ? FlatButton.Style.TAB_ACTIVE : FlatButton.Style.TAB;
+        adv.visible = traceTab;
+        adv.enabled = AdvancedTracing.supported();
+        adv.displayString = (AdvancedTracing.enabled() ? "[x] " : "[ ] ") + "Enable Advanced Tracing (Admin)";
     }
 
     @Override
@@ -142,6 +162,15 @@ public final class GuiMonitor extends GuiBase {
             case B_TAB_TRACE:
                 traceTab = true;
                 break;
+            case B_ADV:
+                boolean on = !AdvancedTracing.enabled();
+                AdvancedTracing.setEnabled(on);
+                if (on && m != null && m.address != null) {
+                    AdvancedTracing.onTrace(m.address, m.connectPort);
+                }
+                toast(on ? "Approve the Windows prompt to start the helper" : "Advanced tracing off",
+                        on ? Theme.ACCENT : Theme.TEXT_DIM);
+                break;
             default:
                 break;
         }
@@ -153,7 +182,8 @@ public final class GuiMonitor extends GuiBase {
             toast("No server address yet", Theme.WARN);
             return;
         }
-        NetDiag.startTraceroute(m.address);
+        NetDiag.startTraceroute(m.address, m.connectPort);
+        AdvancedTracing.onTrace(m.address, m.connectPort);
         traceTab = true;
         scroll = 0;
     }
@@ -200,7 +230,7 @@ public final class GuiMonitor extends GuiBase {
         int py = top + 18;
         Draw.card(rx, py, rw, bottom - py, Theme.CARD, Theme.BORDER);
         if (traceTab) {
-            drawTrace(rx + 5, py + 5, rw - 10, bottom - py - 10, mx, my);
+            drawTrace(rx + 5, py + 5 + ADV_H, rw - 10, bottom - py - 10 - ADV_H, mx, my);
         } else {
             drawRoute(m, s, rx + 5, py + 5, rw - 10, mx, my);
         }
@@ -246,7 +276,11 @@ public final class GuiMonitor extends GuiBase {
         int gy1 = y + h - 4;
         int gw = gx1 - gx0;
         int gh = gy1 - gy0;
-        Draw.text(fontRendererObj, s.samples.size() + " samples", x + 4, y + 3, Theme.TEXT_FAINT);
+        int sx = Draw.text(fontRendererObj, s.samples.size() + " samples", x + 4, y + 3, Theme.TEXT_FAINT);
+        ProxyDetector.Result px0 = proxy(m);
+        if (px0.provider != null) {
+            Draw.text(fontRendererObj, "  USING PROXY: " + px0.provider, sx, y + 3, Theme.WARN);
+        }
         int lgx = x + w - 4;
         lgx = legendItem("fail", Theme.BAD, lgx, y + 3);
         boolean game = NetDiag.isGameServer(m);
@@ -465,6 +499,15 @@ public final class GuiMonitor extends GuiBase {
         if (server != null) {
             rows.add(new String[]{"Network", ownerText(server)});
         }
+        ProxyDetector.Result px = proxy(m);
+        if (px == ProxyDetector.PENDING) {
+            rows.add(new String[]{"Proxy", m.address == null ? "-" : "checking..."});
+        } else if (px.provider == null) {
+            rows.add(new String[]{"Proxy", "none detected"});
+        } else {
+            rows.add(new String[]{"Proxy", PROXY_PREFIX + px.provider + " (ping past its edge is hidden from tracert)"});
+            rows.add(new String[]{"Evidence", px.evidence});
+        }
         boolean game = NetDiag.isGameServer(m);
         if (game) {
             NetDiag.GameSocket g = NetDiag.gameSocket();
@@ -503,7 +546,7 @@ public final class GuiMonitor extends GuiBase {
             }
             String[] r = rows.get(i);
             int color = "Path".equals(r[0]) && r[1].startsWith("local") ? Theme.ACCENT
-                    : TAB_ZERO.equals(r[1]) ? Theme.WARN : Theme.TEXT;
+                    : TAB_ZERO.equals(r[1]) || r[1].startsWith(PROXY_PREFIX) ? Theme.WARN : Theme.TEXT;
             Draw.textClipped(fontRendererObj, r[0], x, ry, labelW - 4, Theme.TEXT_FAINT);
             Draw.textClipped(fontRendererObj, r[1], x + labelW, ry, w - labelW, color);
             if (mx >= x && mx < x + w && my >= ry - 1 && my < ry + ROW_H
@@ -513,68 +556,323 @@ public final class GuiMonitor extends GuiBase {
         }
     }
 
+    // ------------------------------------------------------------------ traceroute tab (scrollable rows)
+
+    /** One line of the Traceroute tab: text (plain or header) or a hop with columns. */
+    private static final class Row {
+        String text = "";
+        int color = Theme.TEXT;
+        String[] tip;
+        boolean hop;
+        String num;
+        String addr;
+        String owner;
+        boolean boundary;
+        String loss;
+        double lossPct = Double.NaN;
+        double ms = Double.NaN;
+    }
+
     private void drawTrace(int x, int y, int w, int h, int mx, int my) {
+        List<Row> rows = traceRows(w);
+        int fit = Math.max(1, h / ROW_H);
+        scroll = Math.max(0, Math.min(scroll, rows.size() - fit));
+        int addrW = Math.min(w - 90, fontRendererObj.getStringWidth("255.255.255.255") + 6);
+        for (int i = scroll; i < rows.size() && i < scroll + fit; i++) {
+            Row r = rows.get(i);
+            int yy = y + (i - scroll) * ROW_H;
+            if (r.hop) {
+                int msW = 36;
+                int lossW = r.loss == null ? 0 : 28;
+                int ownerW = w - 18 - addrW - msW - lossW;
+                Draw.textRight(fontRendererObj, r.num, x + 12, yy, Theme.TEXT_FAINT);
+                Draw.textClipped(fontRendererObj, r.addr == null ? "* no reply" : r.addr, x + 18, yy, addrW - 4,
+                        r.addr == null ? Theme.TEXT_FAINT : r.color);
+                if (r.owner != null && ownerW > 20) {
+                    Draw.textClipped(fontRendererObj, r.owner, x + 18 + addrW, yy, ownerW,
+                            r.boundary ? Theme.ACCENT : Theme.TEXT_FAINT);
+                }
+                if (r.loss != null) {
+                    int lc = Double.isNaN(r.lossPct) || r.lossPct == 0 ? Theme.TEXT_FAINT
+                            : r.lossPct >= 50 ? Theme.BAD : Theme.WARN;
+                    Draw.textRight(fontRendererObj, r.loss, x + w - msW, yy, lc);
+                }
+                Draw.textRight(fontRendererObj, Double.isNaN(r.ms) ? "*" : ms(r.ms) + " ms", x + w, yy,
+                        Theme.latencyColor(r.ms));
+            } else {
+                Draw.textClipped(fontRendererObj, r.text, x, yy, w, r.color);
+            }
+            if (mx >= x && mx < x + w && my >= yy - 1 && my < yy + ROW_H - 1) {
+                if (r.tip != null) {
+                    hover.add(r.tip);
+                } else if (!r.hop && fontRendererObj.getStringWidth(r.text) > w) {
+                    hover.add(fontRendererObj.listFormattedStringToWidth(r.text, 240).toArray(new String[0]));
+                }
+            }
+        }
+    }
+
+    private List<Row> traceRows(int w) {
+        List<Row> rows = new ArrayList<Row>();
         Traceroute tr = NetDiag.traceroute();
         if (tr == null) {
-            Draw.wrapped(fontRendererObj, "Press Trace route (T) to see each hop between you and the server. "
-                    + "This is the system route (ICMP); ExitLag and similar tools do not carry it.", x, y, w,
-                    Theme.TEXT_DIM, 8);
+            wrap(rows, "Press Trace route (T). TCP probes on the game port check whether ExitLag or another local "
+                    + "proxy carries the connection; the system traceroute (ICMP) then lists the routers of your normal "
+                    + "path. The ICMP hops are never ExitLag's route.", Theme.TEXT_DIM, w);
+        } else {
+            text(rows, (tr.running() ? "Tracing " : "Route to ") + tr.destination + ":" + tr.port,
+                    tr.running() ? Theme.ACCENT : Theme.TEXT);
+            tcpRows(rows, tr, w);
+        }
+        advancedRows(rows, tr, w);
+        if (tr != null) {
+            icmpRows(rows, tr, w);
+        }
+        return rows;
+    }
+
+    private void tcpRows(List<Row> rows, Traceroute tr, int w) {
+        Traceroute.TcpResult t = tr.tcp();
+        if (t == null) {
+            text(rows, tr.running() ? "TCP check: " + tr.tcpStatus() + "..." : "TCP check: cancelled", Theme.TEXT_DIM);
             return;
         }
-        String head = (tr.running() ? "Tracing " : "Route to ") + tr.destination;
-        Draw.textClipped(fontRendererObj, head, x, y, w, tr.running() ? Theme.ACCENT : Theme.TEXT);
-        int ry = y + ROW_H + 3;
+        double best = t.best();
+        String at = t.hopDistance > 0 ? ", server at hop " + t.hopDistance : "";
+        String rtt = Double.isNaN(best) ? "" : ", " + ms(best) + " ms";
+        String title;
+        int color;
+        switch (t.verdict) {
+            case EXITLAG_VERIFIED:
+                title = "TCP: ExitLag-routed (verified)" + at + rtt;
+                color = Theme.ACCENT;
+                break;
+            case LOCAL_PROXY:
+                title = "TCP: local proxy, ExitLag not verified" + rtt;
+                color = Theme.WARN;
+                break;
+            case DIRECT:
+                title = "TCP: direct, not via ExitLag" + at + rtt;
+                color = Theme.GOOD;
+                break;
+            default:
+                title = "TCP: ExitLag routing not verified";
+                color = Theme.TEXT_DIM;
+                break;
+        }
+        text(rows, title, color);
+        wrap(rows, t.detail, Theme.TEXT_DIM, w);
+    }
+
+    private void advancedRows(List<Row> rows, Traceroute tr, int w) {
+        HelperClient c = AdvancedTracing.client();
+        if (!AdvancedTracing.enabled() && !c.active()) {
+            return;
+        }
+        text(rows, "", Theme.TEXT);
+        text(rows, "Advanced tracing (admin helper)", Theme.TEXT);
+        Snapshot s = c.snapshot();
+        HelperClient.State st = c.state();
+        int stColor = st == HelperClient.State.FAILED ? Theme.BAD : st == HelperClient.State.CONNECTED
+                ? (s != null && !s.captureOk ? Theme.WARN : Theme.GOOD) : Theme.TEXT_DIM;
+        String msg = c.message();
+        if (st == HelperClient.State.FAILED) {
+            msg += " Turn the checkbox off and on, or press T, to try again.";
+        }
+        wrap(rows, msg, stColor, w);
+        if (s == null) {
+            return;
+        }
+        if (!s.exitLagRunning) {
+            text(rows, "No ExitLag process found on this PC.", Theme.TEXT_DIM);
+        } else {
+            List<Snapshot.Relay> inUse = new ArrayList<Snapshot.Relay>();
+            List<String> probing = new ArrayList<String>();
+            List<String> idle = new ArrayList<String>();
+            for (Snapshot.Relay r : s.relays) {
+                if (r.inUse) {
+                    inUse.add(r);
+                } else if (r.verified) {
+                    probing.add(r.protocol + " " + r.endpoint() + (r.service ? " (ExitLag web/API)" : ""));
+                } else {
+                    idle.add(r.protocol + " " + r.endpoint());
+                }
+            }
+            text(rows, "ExitLag relays in use (verified: captured traffic on ExitLag's own sockets)", Theme.TEXT_DIM);
+            if (inUse.isEmpty()) {
+                wrap(rows, "None right now: ExitLag isn't tunnelling anything. Join the server with ExitLag on.",
+                        Theme.TEXT_FAINT, w);
+            }
+            for (Snapshot.Relay r : inUse) {
+                Row row = text(rows, "IN USE  " + r.protocol + " " + r.endpoint() + String.format(Locale.ROOT,
+                        "  %.0f pkt/s", r.packetsOutPerSec + r.packetsInPerSec) + (r.primary ? "  (primary)" : ""),
+                        Theme.ACCENT);
+                row.tip = relayTip(r);
+            }
+            if (!probing.isEmpty()) {
+                Row row = text(rows, "ExitLag is also measuring " + probing.size()
+                        + " other relay(s) with short probes (not routes)", Theme.TEXT_FAINT);
+                row.tip = listTip("Measured, not in use:", probing);
+            }
+            if (!idle.isEmpty()) {
+                Row row = text(rows, "ExitLag holds " + idle.size() + " idle TCP connection(s) (no traffic captured)",
+                        Theme.TEXT_FAINT);
+                row.tip = listTip("Idle ExitLag connections (unverified):", idle);
+            }
+            for (Snapshot.Relay r : inUse) {
+                Snapshot.Path p = s.path(r.pathKey);
+                if (p == null) {
+                    text(rows, "Path to relay " + r.endpoint() + ": waiting to trace...", Theme.TEXT_DIM);
+                } else {
+                    pathRows(rows, p, w);
+                }
+            }
+        }
+        for (Snapshot.Path p : s.paths) {
+            if ("server".equals(p.kind) && (tr == null || p.target.equals(tr.destination))) {
+                pathRows(rows, p, w);
+            }
+        }
+        if (!s.events.isEmpty()) {
+            text(rows, "", Theme.TEXT);
+            text(rows, "Route changes", Theme.TEXT);
+            SimpleDateFormat f = new SimpleDateFormat("HH:mm:ss", Locale.ROOT);
+            for (int i = s.events.size() - 1, n = 0; i >= 0 && n < 8; i--, n++) {
+                Snapshot.Event e = s.events.get(i);
+                text(rows, f.format(new Date(e.time)) + "  " + e.text, Theme.TEXT_DIM);
+            }
+        }
+    }
+
+    private void pathRows(List<Row> rows, Snapshot.Path p, int w) {
+        boolean relay = "relay".equals(p.kind);
+        String state = "running".equals(p.state) ? " (tracing...)" : p.reached ? ", reached" : "";
+        text(rows, "", Theme.TEXT);
+        Row head = text(rows, (relay ? "Path to ExitLag relay " : "Path to server ") + p.target + ":" + p.port + " via "
+                + p.protocol + state, relay ? Theme.ACCENT : Theme.TEXT);
+        head.tip = fontRendererObj.listFormattedStringToWidth("Measured " + p.traces + " time(s), last at "
+                + new SimpleDateFormat("HH:mm:ss", Locale.ROOT).format(new Date(p.updatedAt)) + ". " + p.protocol
+                + " probes with rising TTL; loss is over 3 probes per hop. Loss at one router while later hops are "
+                + "fine is ICMP rate limiting, not real loss.", 240).toArray(new String[0]);
+        String prevAsn = null;
+        for (Snapshot.Hop hop : p.hops) {
+            AsnLookup.Info owner = AsnLookup.get(hop.address);
+            Row r = new Row();
+            r.hop = true;
+            r.num = String.valueOf(hop.ttl);
+            r.addr = hop.address;
+            r.color = hop.destination ? Theme.ACCENT : Theme.TEXT;
+            r.ms = hop.avg;
+            r.lossPct = hop.lossPercent();
+            r.loss = hop.sent == 0 ? null : String.format(Locale.ROOT, "%.0f%%", r.lossPct);
+            if (owner != null) {
+                r.owner = owner.label;
+                r.boundary = owner.asn != null && !owner.asn.equals(prevAsn);
+                if (owner.asn != null) {
+                    prevAsn = owner.asn;
+                }
+            }
+            List<String> tip = new ArrayList<String>();
+            tip.add("Hop " + hop.ttl + (hop.destination ? " (target)" : "") + ": " + hop.received + "/" + hop.sent
+                    + " replies" + (hop.received == 0 ? "" : String.format(Locale.ROOT, ", %s / %s / %s ms min/avg/max",
+                    ms(hop.min), ms(hop.avg), ms(hop.max))));
+            if (hop.others != null && !hop.others.isEmpty()) {
+                tip.addAll(fontRendererObj.listFormattedStringToWidth("Also replied (load balancing): " + hop.others,
+                        220));
+            }
+            if (owner != null) {
+                tip.addAll(ownerLines(owner));
+            }
+            r.tip = tip.toArray(new String[0]);
+            rows.add(r);
+        }
+        if (relay) {
+            text(rows, "    beyond the relay: inside ExitLag's tunnel, not visible", Theme.TEXT_FAINT);
+        }
+        if (p.note != null && !p.note.isEmpty()) {
+            wrap(rows, p.note, Theme.TEXT_DIM, w);
+        }
+    }
+
+    private void icmpRows(List<Row> rows, Traceroute tr, int w) {
+        text(rows, "", Theme.TEXT);
+        String cmp = tr.pathComparison();
+        text(rows, "ICMP hops to the server (system traceroute, not ExitLag's route)", Theme.TEXT);
+        if (cmp != null) {
+            wrap(rows, cmp, Theme.TEXT_DIM, w);
+        }
         if (tr.error() != null) {
-            Draw.wrapped(fontRendererObj, tr.error(), x, ry, w, Theme.BAD, 4);
+            wrap(rows, tr.error(), Theme.BAD, w);
             return;
         }
         List<Traceroute.Hop> hops = tr.hops();
-        int fit = Math.max(1, (y + h - ry) / ROW_H);
-        scroll = Math.max(0, Math.min(scroll, hops.size() - fit));
-        int addrW = Math.min(w - 60, fontRendererObj.getStringWidth("255.255.255.255") + 6);
-        int ownerW = w - 18 - addrW - 40;
-        // owner (AS) of the last replying hop above the first visible row, to spot where the network changes
         String prevAsn = null;
-        for (int i = 0; i < scroll && i < hops.size(); i++) {
-            AsnLookup.Info a = AsnLookup.get(hops.get(i).address);
-            if (a != null && a.asn != null) {
-                prevAsn = a.asn;
-            }
-        }
-        for (int i = scroll; i < hops.size() && i < scroll + fit; i++) {
-            Traceroute.Hop hop = hops.get(i);
-            int yy = ry + (i - scroll) * ROW_H;
-            double best = hop.best();
+        for (Traceroute.Hop hop : hops) {
             AsnLookup.Info owner = AsnLookup.get(hop.address);
-            Draw.textRight(fontRendererObj, String.valueOf(hop.number), x + 12, yy, Theme.TEXT_FAINT);
-            Draw.textClipped(fontRendererObj, hop.address == null ? "* no reply" : hop.address, x + 18, yy, addrW - 4,
-                    hop.address == null ? Theme.TEXT_FAINT : Theme.TEXT);
-            if (owner != null && ownerW > 20) {
-                // highlight the first hop of each new network: that is where an operator boundary is crossed
-                boolean changed = owner.asn != null && !owner.asn.equals(prevAsn);
-                Draw.textClipped(fontRendererObj, owner.label, x + 18 + addrW, yy, ownerW,
-                        changed ? Theme.ACCENT : Theme.TEXT_FAINT);
-            }
-            if (owner != null && owner.asn != null) {
-                prevAsn = owner.asn;
-            }
-            Draw.textRight(fontRendererObj, Double.isNaN(best) ? "*" : ms(best) + " ms", x + w, yy,
-                    Theme.latencyColor(best));
-            if (mx >= x && mx < x + w && my >= yy - 1 && my < yy + ROW_H - 1) {
-                StringBuilder sb = new StringBuilder("Hop " + hop.number + ":");
-                for (double r : hop.rtts) {
-                    sb.append(Double.isNaN(r) ? "  *" : "  " + ms(r) + " ms");
+            Row r = new Row();
+            r.hop = true;
+            r.num = String.valueOf(hop.number);
+            r.addr = hop.address;
+            r.ms = hop.best();
+            if (owner != null) {
+                r.owner = owner.label;
+                r.boundary = owner.asn != null && !owner.asn.equals(prevAsn);
+                if (owner.asn != null) {
+                    prevAsn = owner.asn;
                 }
-                List<String> tip = new ArrayList<String>();
-                tip.add(sb.toString());
-                if (owner != null) {
-                    tip.addAll(ownerLines(owner));
-                }
-                hover.add(tip.toArray(new String[0]));
             }
+            StringBuilder sb = new StringBuilder("Hop " + hop.number + ":");
+            for (double v : hop.rtts) {
+                sb.append(Double.isNaN(v) ? "  *" : "  " + ms(v) + " ms");
+            }
+            List<String> tip = new ArrayList<String>();
+            tip.add(sb.toString());
+            if (owner != null) {
+                tip.addAll(ownerLines(owner));
+            }
+            r.tip = tip.toArray(new String[0]);
+            rows.add(r);
         }
-        if (hops.isEmpty() && tr.running()) {
-            Draw.text(fontRendererObj, "waiting for first hop...", x, ry, Theme.TEXT_FAINT);
+        if (hops.isEmpty() && tr.icmpRunning()) {
+            text(rows, "waiting for first hop...", Theme.TEXT_FAINT);
+        }
+    }
+
+    private static String[] relayTip(Snapshot.Relay r) {
+        List<String> t = new ArrayList<String>();
+        t.add(r.protocol + " " + r.endpoint() + (r.primary ? " (primary)" : ""));
+        t.add("Owner: " + r.process + " (pid " + r.pid + ")");
+        t.add(String.format(Locale.ROOT, "Out %.1f pkt/s, in %.1f pkt/s, %.1f KB/s", r.packetsOutPerSec,
+                r.packetsInPerSec, r.bytesPerSec / 1024));
+        t.add("Traffic for " + r.activeSeconds + " s, last packet " + (r.lastSeenAgoMs < 0 ? "never"
+                : (r.lastSeenAgoMs / 1000) + " s ago"));
+        t.add("Verified: traffic was captured on a socket owned by ExitLag.");
+        return t.toArray(new String[0]);
+    }
+
+    private static String[] listTip(String title, List<String> items) {
+        List<String> t = new ArrayList<String>();
+        t.add(title);
+        for (int i = 0; i < items.size() && i < 15; i++) {
+            t.add("  " + items.get(i));
+        }
+        if (items.size() > 15) {
+            t.add("  (+" + (items.size() - 15) + " more)");
+        }
+        return t.toArray(new String[0]);
+    }
+
+    private static Row text(List<Row> rows, String text, int color) {
+        Row r = new Row();
+        r.text = text;
+        r.color = color;
+        rows.add(r);
+        return r;
+    }
+
+    private void wrap(List<Row> rows, String text, int color, int w) {
+        for (String line : fontRendererObj.listFormattedStringToWidth(text, w)) {
+            text(rows, line, color);
         }
     }
 
@@ -605,6 +903,10 @@ public final class GuiMonitor extends GuiBase {
         if (server != null) {
             sb.append("Server network: ").append(ownerText(server)).append('\n');
         }
+        ProxyDetector.Result px = proxy(m);
+        if (px.provider != null) {
+            sb.append("Using proxy: ").append(px.provider).append(" (").append(px.evidence).append(")\n");
+        }
         sb.append(String.format(Locale.ROOT, "Samples %d over %ds, every %s%n", s.samples.size(),
                 s.samples.isEmpty() ? 0 : (s.last().time - s.samples.get(0).time) / 1000, fmtInterval(m.intervalMs)));
         if (!p.isEmpty()) {
@@ -625,8 +927,40 @@ public final class GuiMonitor extends GuiBase {
             sb.append("Tab-list ping: ").append(tab == 0 ? TAB_ZERO : tab + " ms").append('\n');
         }
         Traceroute tr = NetDiag.traceroute();
+        if (tr != null && tr.tcp() != null) {
+            Traceroute.TcpResult t = tr.tcp();
+            sb.append("TCP check to ").append(tr.destination).append(':').append(tr.port).append(": ")
+                    .append(t.verdict).append(" - ").append(t.detail).append('\n');
+        }
+        Snapshot adv = AdvancedTracing.client().snapshot();
+        if (adv != null) {
+            sb.append("Advanced tracing: ").append(adv.status).append('\n');
+            for (Snapshot.Relay r : adv.relays) {
+                if (r.inUse) {
+                    sb.append(String.format(Locale.ROOT, "ExitLag relay in use: %s %s, %.0f pkt/s%s%n", r.protocol,
+                            r.endpoint(), r.packetsOutPerSec + r.packetsInPerSec, r.primary ? " (primary)" : ""));
+                }
+            }
+            for (Snapshot.Path ap : adv.paths) {
+                sb.append("Path to ").append(ap.kind).append(' ').append(ap.target).append(':').append(ap.port)
+                        .append(" via ").append(ap.protocol).append(": ").append(ap.note).append('\n');
+                for (Snapshot.Hop h : ap.hops) {
+                    sb.append(String.format(Locale.ROOT, "%3d  %-40s %-8s loss %3.0f%%%n", h.ttl,
+                            h.address == null ? "*" : h.address, Double.isNaN(h.avg) ? "*" : ms(h.avg) + " ms",
+                            h.lossPercent()));
+                }
+                if ("relay".equals(ap.kind)) {
+                    sb.append("     (beyond the relay: inside ExitLag's tunnel, not visible)\n");
+                }
+            }
+            for (Snapshot.Event e : adv.events) {
+                sb.append("Event: ").append(e.text).append('\n');
+            }
+        }
         if (tr != null && !tr.hops().isEmpty()) {
-            sb.append("Traceroute to ").append(tr.destination).append(":\n");
+            String cmp = tr.pathComparison();
+            sb.append("ICMP traceroute to ").append(tr.destination).append(" (system route, not ExitLag's)")
+                    .append(cmp == null ? "" : ". " + cmp).append(":\n");
             for (Traceroute.Hop h : tr.hops()) {
                 double b = h.best();
                 AsnLookup.Info o = AsnLookup.get(h.address);
@@ -639,6 +973,10 @@ public final class GuiMonitor extends GuiBase {
     }
 
     /** One line: "AS13335 CLOUDFLARENET - Cloudflare, Inc., US (104.16.0.0/13)" or the status text. */
+    private static ProxyDetector.Result proxy(PingMonitor m) {
+        return ProxyDetector.get(m.target.host, m.connectHost, m.address);
+    }
+
     private static String ownerText(AsnLookup.Info o) {
         if (AsnLookup.pending(o)) {
             return "looking up...";

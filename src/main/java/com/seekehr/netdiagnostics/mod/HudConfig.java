@@ -13,6 +13,8 @@ public final class HudConfig {
     public static boolean enabled = true;
     public static int x = DEFAULT_X;
     public static int y = DEFAULT_Y;
+    /** Advanced (administrator) tracing with the elevated helper; off by default. */
+    public static boolean advancedTracing;
     private static Configuration cfg;
 
     private HudConfig() {
@@ -24,6 +26,9 @@ public final class HudConfig {
         enabled = cfg.getBoolean("enabled", CAT, true, "Show the ping HUD while monitoring.");
         x = cfg.getInt("x", CAT, DEFAULT_X, 0, 10000, "HUD left edge, in GUI pixels.");
         y = cfg.getInt("y", CAT, DEFAULT_Y, 0, 10000, "HUD top edge, in GUI pixels.");
+        advancedTracing = cfg.getBoolean("advancedTracing", "trace", false,
+                "Advanced tracing: start an elevated helper (asks for administrator rights via UAC) for packet "
+                        + "capture and ExitLag relay traces.");
         if (cfg.hasChanged()) {
             cfg.save();
         }
@@ -36,6 +41,7 @@ public final class HudConfig {
         cfg.get(CAT, "enabled", true).set(enabled);
         cfg.get(CAT, "x", DEFAULT_X).set(x);
         cfg.get(CAT, "y", DEFAULT_Y).set(y);
+        cfg.get("trace", "advancedTracing", false).set(advancedTracing);
         cfg.save();
     }
 }

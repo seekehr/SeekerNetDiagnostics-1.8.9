@@ -66,12 +66,12 @@ public final class NetDiag {
         }
     }
 
-    public static Traceroute startTraceroute(String address) {
+    public static Traceroute startTraceroute(String address, int port) {
         Traceroute old = traceroute;
         if (old != null) {
             old.cancel();
         }
-        Traceroute tr = new Traceroute(address);
+        Traceroute tr = new Traceroute(address, port);
         traceroute = tr;
         tr.start();
         return tr;

@@ -96,6 +96,17 @@ public final class AsnLookup {
         return PENDING;
     }
 
+    /** Blocking variant for background threads: waits up to {@code timeoutMs} for the cached lookup. */
+    static Info await(String ip, long timeoutMs) throws InterruptedException {
+        long end = System.currentTimeMillis() + timeoutMs;
+        Info i = get(ip);
+        while (i == PENDING && System.currentTimeMillis() < end) {
+            Thread.sleep(100);
+            i = get(ip);
+        }
+        return i;
+    }
+
     public static boolean pending(Info i) {
         return i == PENDING;
     }
@@ -106,7 +117,7 @@ public final class AsnLookup {
             return FAILED;
         }
         try {
-            List<String> txt = txt(q);
+            List<String> txt = records(q, "TXT");
             if (txt.isEmpty()) {
                 return NONE;
             }
@@ -144,7 +155,7 @@ public final class AsnLookup {
         }
         String name = null;
         try {
-            List<String> txt = txt("AS" + asn + ".asn.cymru.com");
+            List<String> txt = records("AS" + asn + ".asn.cymru.com", "TXT");
             if (!txt.isEmpty()) {
                 String[] f = fields(txt.get(0));
                 name = f.length >= 5 ? f[4] : null;
@@ -216,7 +227,7 @@ public final class AsnLookup {
         return asn + " " + n.trim();
     }
 
-    private static List<String> txt(String name) throws Exception {
+    static List<String> records(String name, String type) throws Exception {
         Hashtable<String, String> env = new Hashtable<String, String>();
         env.put("java.naming.factory.initial", "com.sun.jndi.dns.DnsContextFactory");
         env.put("java.naming.provider.url", "dns:");
@@ -224,9 +235,9 @@ public final class AsnLookup {
         env.put("com.sun.jndi.dns.timeout.retries", "2");
         DirContext ctx = new InitialDirContext(env);
         try {
-            Attributes attrs = ctx.getAttributes(name, new String[]{"TXT"});
+            Attributes attrs = ctx.getAttributes(name, new String[]{type});
             List<String> out = new ArrayList<String>();
-            Attribute a = attrs.get("TXT");
+            Attribute a = attrs.get(type);
             if (a != null) {
                 NamingEnumeration<?> e = a.getAll();
                 while (e.hasMore()) {

@@ -7,6 +7,8 @@ handles Minecraft), and shows everything on one screen.
 **Why not `ping` or `tracert`?** ExitLag optimizes traffic per program. Command-line tools are separate
 programs (and `ping` uses ICMP, which ExitLag doesn't route), so they show your normal route.
 
+## Preview
+
 ## Safety
 
 - Never touches game packets. Pings use their own separate connections.
@@ -72,8 +74,56 @@ The monitor screen has:
 - **Route:** what you typed, the SRV record, DNS answers, the IP being pinged, the game socket's remote and
   local address, which network adapter the game and the pings leave through, TCP connect time, and whether a
   local proxy (ExitLag/VPN) is intercepting the connection. Also tab-list ping vs measured ping and server info.
-- **Traceroute:** runs the system `tracert` to the server IP and lists each hop. This is your normal ISP
-  route: it uses ICMP, which ExitLag doesn't carry.
+- **Traceroute:** two checks, run side by side.
+  - **TCP check (Windows):** TCP SYNs to the game port from inside the game, with a limited TTL. It finds
+    how many hops away the server answers, the RTT, and whether a local proxy took the connection over.
+    The result says **ExitLag-routed** only when that is verified: either the process that accepted the
+    probe is ExitLag (read from the Windows TCP table), or the probe left through ExitLag's network adapter.
+    Using port 25565, or having ExitLag running, is not treated as proof. When ExitLag is verified, its open
+    TCP connections are listed as relay candidates (they may include its own servers). The route inside its
+    tunnel stays hidden.
+  - **ICMP hops:** the system `tracert`, listing each router. This is your normal ISP route, never ExitLag's.
+    Windows doesn't let a program without admin rights see routers' replies to TCP probes, so the router
+    list has to come from ICMP. If the TCP and ICMP paths reach the server at different hop counts, the
+    screen says so.
+  - **Enable Advanced Tracing (Admin)** (Windows, off by default): see below.
+
+### Advanced Tracing (Admin)
+
+Ticking the checkbox at the top of the Traceroute tab starts a separate **helper process** with administrator
+rights. Windows asks once through UAC (it shows up as the Java runtime that Minecraft uses). **Minecraft itself
+is never elevated.** The helper talks to the mod only over `127.0.0.1` with a one-time token. It accepts just
+three commands (trace this server, re-trace, quit) and exits when the game closes or you untick the box. With the
+box unticked, nothing extra runs and nothing asks for admin rights. The setting is saved in
+`config/seekernetdiagnostics.cfg`.
+
+What it does:
+
+- **Finds the relays ExitLag really uses.** It captures packets on every IPv4 adapter (raw sockets with
+  `SIO_RCVALL`; no Npcap needed) and matches them to sockets owned by ExitLag processes, using the Windows socket
+  tables plus an owner lookup on each new connection's SYN. A relay is **verified** only when traffic on ExitLag's
+  own sockets to that IP was captured. ExitLag constantly opens short connections to dozens of candidate relays
+  to measure them; those are listed as "measuring", not as routes. A relay is **in use** once its traffic is
+  sustained, and stays in use until it has been silent for 20 s. Several relays can be in use at once (multipath).
+- **Traces the path to each in-use relay** (up to 4), with 3 probes per hop: router IPs, owner network, min/avg/max
+  RTT and loss per hop. It first tries TCP or UDP probes on the relay's own protocol and port. ExitLag takes over
+  TCP from Java processes on this PC, so in practice relay paths are usually measured with ICMP echo, and the
+  screen says which method was used. The trace stops at the relay. Everything after it is inside ExitLag's tunnel
+  and is shown as hidden. No hops there are invented.
+- **Traces the game server with TCP.** If ExitLag has taken that connection over, it says so instead of showing a
+  fake path.
+- **Detects route changes.** It logs when ExitLag starts or stops routing through a relay, when the primary
+  (busiest) relay changes, and when a re-trace (relays every 60 s, server every 2 min) finds a different router
+  or hop count. Lost probes are not counted as changes.
+
+**Firewall:** Windows doesn't deliver inbound ICMP Time Exceeded/Unreachable to a program unless a firewall rule
+allows it, and routers send those replies for TCP/UDP probes. While the helper runs, it adds one rule, named
+"SeekerNetDiagnostics Advanced Tracing (temporary, ICMP errors)". The rule allows only inbound ICMPv4 types 3 and
+11, only for the Java executable the helper runs as. The helper removes the rule when it exits and deletes any
+stale copy when it starts. ICMP-echo relay traces work without the rule.
+
+Limits: capture is IPv4 only, and loopback traffic is not seen. ExitLag may also use a relay that only carries
+traffic sporadically, which can take up to 15 s to qualify as "in use".
 
 Buttons: Pause (`Space`), interval (0.5/1/2/5 s), Reset (`R`), Trace route (`T`), Copy summary (`C`).
 Closing the screen keeps pinging in the background with the HUD; `/snd` reopens it.
