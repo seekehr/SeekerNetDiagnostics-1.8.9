@@ -116,9 +116,8 @@ public final class PingMonitor {
     private final TabPing tabPing;
     private final AtomicBoolean stop = new AtomicBoolean();
     private final ArrayDeque<Sample> buffer = new ArrayDeque<Sample>();
-    private volatile int version;
-    private Snapshot cached;
-    private int cachedVersion = -1;
+    /** Rebuilt by whoever changes the buffer (normally the monitor thread), so readers never compute stats. */
+    private volatile Snapshot snapshot = new Snapshot(new ArrayList<Sample>());
     private Thread thread;
 
     public volatile int intervalMs = 1000;
@@ -173,7 +172,7 @@ public final class PingMonitor {
     public void reset() {
         synchronized (buffer) {
             buffer.clear();
-            version++;
+            snapshot = new Snapshot(new ArrayList<Sample>());
         }
     }
 
@@ -187,15 +186,12 @@ public final class PingMonitor {
         intervalMs = 1000;
     }
 
-    /** Cached snapshot; recomputed only after a new sample arrives. */
+    /**
+     * Latest snapshot. Lock-free and allocation-free: statistics are computed on the monitor thread when a sample
+     * arrives, so the render and client threads only read a field.
+     */
     public Snapshot snapshot() {
-        synchronized (buffer) {
-            if (cached == null || cachedVersion != version) {
-                cached = new Snapshot(new ArrayList<Sample>(buffer));
-                cachedVersion = version;
-            }
-            return cached;
-        }
+        return snapshot;
     }
 
     private void add(Sample s) {
@@ -204,7 +200,8 @@ public final class PingMonitor {
             while (buffer.size() > CAPACITY) {
                 buffer.removeFirst();
             }
-            version++;
+            // Built under the lock so a concurrent reset() can never be overwritten by a stale snapshot.
+            snapshot = new Snapshot(new ArrayList<Sample>(buffer));
         }
     }
 

@@ -32,9 +32,10 @@ build/
 run/
 out/
 eclipse/
-.vscode/
 *.iml
 *.ipr
 *.iws
 .idea/
 classes/
+config.bat
+node_modules
