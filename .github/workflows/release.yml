@@ -98,8 +98,9 @@ jobs:
           cache: gradle
 
       - name: Build and test
-        # gradlew is not marked executable in git, so run it through sh.
-        run: sh ./gradlew build --no-daemon --stacktrace
+        # gradlew is not marked executable in git, and this Gradle 2.7 script uses bash-only
+        # syntax (arrays, `function`), so run it through bash; Ubuntu's sh is dash and cannot parse it.
+        run: bash ./gradlew build --no-daemon --stacktrace
 
       - name: Collect production JAR and checksum
         run: |

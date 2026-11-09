@@ -55,14 +55,3 @@ For **screensharing** purposes, run `Get-FileHash .\SeekerNetDiagnostics-1.8.9.j
 Keyboard shortcuts in the monitor screen: `Space` pause, `R` reset, `T` trace route, `C` copy summary.
 Settings are stored in `config/seekernetdiagnostics.cfg`.
 
-## Building
-
-Requires JDK 8.
-
-```bash
-./gradlew build
-```
-
-The output jar is written to `build/libs/`. To set up IntelliJ, run
-`./gradlew setupDecompWorkspace idea genIntellijRuns` and open the generated `.ipr` file. Development runs use
-[DevAuth](https://github.com/DJtheRedstoner/DevAuth) for Microsoft sign-in; it is not included in the release jar.
