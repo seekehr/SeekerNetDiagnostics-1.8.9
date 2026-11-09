@@ -96,7 +96,7 @@ public final class HelperMain {
                             }
                         } else if ("PROXY".equals(f[0]) && f.length >= 2 && mon != null) {
                             try {
-                                mon.addProxyPid(Integer.parseInt(f[1]));
+                                mon.setFocus(Integer.parseInt(f[1]));
                             } catch (NumberFormatException ignored) {
                                 // invalid command
                             }

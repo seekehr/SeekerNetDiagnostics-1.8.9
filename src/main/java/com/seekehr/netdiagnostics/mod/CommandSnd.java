@@ -50,8 +50,8 @@ public final class CommandSnd extends CommandBase {
     public void processCommand(ICommandSender sender, String[] args) {
         String sub = args.length == 0 ? "" : args[0].toLowerCase(Locale.ROOT);
         if ("stop".equals(sub)) {
-            NetDiag.stop();
-            Chat.info("Monitoring stopped.");
+            NetDiag.stopByUser();
+            Chat.info("Monitoring stopped. It starts again on the next server you join (or with /snd).");
             return;
         }
         if ("hud".equals(sub)) {
@@ -62,7 +62,7 @@ public final class CommandSnd extends CommandBase {
             Chat.info("/snd - monitor the server you're on");
             Chat.info("/snd <host> [port] - monitor another server");
             Chat.info("/snd hud - drag the ping HUD or turn it on/off");
-            Chat.info("/snd stop - stop pinging");
+            Chat.info("/snd stop - stop pinging (until you join another server)");
             Chat.info("/snd help - show this list");
             return;
         }
@@ -81,7 +81,7 @@ public final class CommandSnd extends CommandBase {
             Chat.error("Could not read the current server's address.");
             return;
         }
-        NetDiag.monitor(t);
+        NetDiag.monitorByUser(t);
         ClientEvents.openNextTick(new GuiMonitor());
     }
 }

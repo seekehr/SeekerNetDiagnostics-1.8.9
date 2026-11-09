@@ -24,7 +24,7 @@ import java.util.regex.Pattern;
  * is really using, and keeps hop-by-hop traces of them (and of the game server).
  *
  * <p>Proxy processes are the known optimizers/VPNs ({@link Proxies}) plus any PID the mod reports as having
- * accepted the game's connection ({@link #addProxyPid}).
+ * accepted the game's connection ({@link #setFocus}). With a focus process set, only its relays are traced.
  *
  * <p>A relay is <b>verified</b> only when packets on a socket owned by a proxy process (Windows socket tables)
  * to or from that endpoint were captured within the last {@link #VERIFIED_WINDOW_MS}. Proxy TCP connections
@@ -61,15 +61,27 @@ final class RelayMonitor {
     private boolean firstScan = true;
     private boolean proxyRunning;
     private String proxyNames = "";
-    /** PIDs reported by the mod as having accepted the game connection. */
-    private final Set<Integer> extraPids = java.util.Collections.newSetFromMap(new ConcurrentHashMap<Integer, Boolean>());
+    /** The process the mod reports as carrying the game (0 = none), and its product name. */
+    private volatile int focusPid;
+    private volatile String focusLabel;
+    /** Keys of traces running now (up to {@link #PARALLEL_TRACES} at once). */
+    private final Set<String> inFlight = java.util.Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
+    static final int PARALLEL_TRACES = 3;
+    private final java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(
+            PARALLEL_TRACES, new java.util.concurrent.ThreadFactory() {
+                @Override
+                public Thread newThread(Runnable r) {
+                    Thread t = new Thread(r, "SND-trace");
+                    t.setDaemon(true);
+                    return t;
+                }
+            });
     /** First time each open proxy TCP connection ("localPort remote:port") was seen. */
     private final Map<String, Long> connFirstSeen = new HashMap<String, Long>();
     private volatile boolean icmpSeen;
     private volatile String serverIp;
     private volatile int serverPort;
     private volatile boolean retraceRequested;
-    private volatile String tracing;
     private final AtomicBoolean cancel = new AtomicBoolean();
 
     RelayMonitor(Capture cap) {
@@ -102,15 +114,25 @@ final class RelayMonitor {
         retraceRequested = true;
     }
 
-    /** Treats {@code pid} as a proxy process (it accepted the game's connection). */
-    void addProxyPid(int pid) {
+    /** Follows {@code pid} as the process carrying the game; 0 (or less) clears it. */
+    void setFocus(int pid) {
         if (pid > 4) {
-            extraPids.add(pid);
+            focusLabel = Proxies.label(WinTcpTrace.processName(pid));
+            focusPid = pid;
+        } else {
+            focusPid = 0;
+            focusLabel = null;
         }
     }
 
     boolean isProxy(int pid, String name) {
-        return extraPids.contains(pid) || Proxies.known(name) != null;
+        return pid == focusPid && pid > 0 || Proxies.known(name) != null;
+    }
+
+    /** With a focus process: only relays of that process or the same product (e.g. ExitLag's two processes). */
+    private boolean focused(Snapshot.Relay r) {
+        int f = focusPid;
+        return f <= 0 || r.pid == f || focusLabel != null && focusLabel.equals(Proxies.label(r.process));
     }
 
     void stop() {
@@ -484,13 +506,29 @@ final class RelayMonitor {
 
     private void tracerLoop() {
         while (!cancel.get()) {
-            Job job = nextJob();
-            if (job == null) {
-                sleep(1000);
+            if (inFlight.size() >= PARALLEL_TRACES) {
+                sleep(200);
                 continue;
             }
-            run(job);
+            final Job job = nextJob();
+            if (job == null) {
+                sleep(500);
+                continue;
+            }
+            pool.submit(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        RelayMonitor.this.run(job);
+                    } catch (Throwable ignored) {
+                        // keep tracing other targets
+                    } finally {
+                        inFlight.remove(job.key);
+                    }
+                }
+            });
         }
+        pool.shutdownNow();
     }
 
     private static final class Job {
@@ -510,11 +548,14 @@ final class RelayMonitor {
         }
         int traced = 0;
         for (Snapshot.Relay r : relays) {
-            if (!r.inUse || traced >= MAX_TRACED_RELAYS) {
+            if (!r.inUse || !focused(r) || traced >= MAX_TRACED_RELAYS) {
                 continue;
             }
             traced++;
             String key = relayKey(r.protocol, r.ip, r.port);
+            if (inFlight.contains(key)) {
+                continue;
+            }
             Long last = lastTraced.get(key);
             if (last == null || now - last > RELAY_RETRACE_MS) {
                 Job j = new Job();
@@ -525,13 +566,14 @@ final class RelayMonitor {
                 j.port = r.port;
                 j.label = Proxies.label(r.process);
                 lastTraced.put(key, now);
+                inFlight.add(key);
                 return j;
             }
         }
         if (serverIp != null) {
             String key = serverKey();
             Long last = lastTraced.get(key);
-            if (last == null || now - last > SERVER_RETRACE_MS) {
+            if (!inFlight.contains(key) && (last == null || now - last > SERVER_RETRACE_MS)) {
                 Job j = new Job();
                 j.key = key;
                 j.kind = "server";
@@ -539,6 +581,7 @@ final class RelayMonitor {
                 j.ip = serverIp;
                 j.port = serverPort;
                 lastTraced.put(key, now);
+                inFlight.add(key);
                 return j;
             }
         }
@@ -574,7 +617,6 @@ final class RelayMonitor {
             p.updatedAt = System.currentTimeMillis();
             paths.put(job.key, p);
         }
-        tracing = job.key;
         PathTracer.Progress progress = new PathTracer.Progress() {
             @Override
             public void update(List<Snapshot.Hop> hops) {
@@ -617,7 +659,6 @@ final class RelayMonitor {
                         + "its tunnel; see the relay paths. ";
             }
         }
-        tracing = null;
         synchronized (this) {
             p.protocol = method;
             p.hops = res.hops;
@@ -677,8 +718,10 @@ final class RelayMonitor {
         return s;
     }
 
+    /** "2 path(s)" while traces run, else null. */
     String tracing() {
-        return tracing;
+        int n = inFlight.size();
+        return n == 0 ? null : n + " path(s)";
     }
 
     private static void sleep(long ms) {

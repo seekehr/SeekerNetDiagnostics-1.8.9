@@ -2,8 +2,9 @@ package com.seekehr.netdiagnostics.mod;
 
 import com.seekehr.netdiagnostics.SeekerNetDiagnostics;
 import com.seekehr.netdiagnostics.core.monitor.PingMonitor;
-import com.seekehr.netdiagnostics.core.monitor.Traceroute;
 import com.seekehr.netdiagnostics.core.net.Target;
+import com.seekehr.netdiagnostics.core.stats.StatSummary;
+import com.seekehr.netdiagnostics.route.RouteAnalysis;
 import io.netty.channel.Channel;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ServerData;
@@ -22,9 +23,14 @@ public final class NetDiag {
     public static final Logger LOG = LogManager.getLogger(SeekerNetDiagnostics.NAME);
 
     private static volatile PingMonitor monitor;
-    private static volatile Traceroute traceroute;
+    private static final RouteAnalysis ROUTES = new RouteAnalysis();
     private static volatile int tabPing = -1;
     private static volatile Target gameTarget;
+    /** Server the user stopped with /snd stop: not auto-started again until another server is joined. */
+    private static Target userStopped;
+    private static Target lastGameTarget;
+    /** The running monitor was started automatically (for the HUD), not by /snd. */
+    private static boolean autoStarted;
 
     private NetDiag() {
     }
@@ -33,8 +39,24 @@ public final class NetDiag {
         return monitor;
     }
 
-    public static Traceroute traceroute() {
-        return traceroute;
+    /** Route analysis rounds (TCP check, relays, ICMP) and the last finished report. */
+    public static RouteAnalysis routes() {
+        return ROUTES;
+    }
+
+    /** /snd: starts monitoring {@code t} at the user's request. */
+    public static PingMonitor monitorByUser(Target t) {
+        userStopped = null;
+        PingMonitor m = monitor(t);
+        autoStarted = false;
+        return m;
+    }
+
+    /** /snd stop: stops monitoring and keeps it off on this server until you join another one. */
+    public static void stopByUser() {
+        userStopped = gameTarget;
+        autoStarted = false;
+        stop();
     }
 
     /** Starts monitoring {@code t}, replacing any running monitor (unless it already targets t). */
@@ -50,6 +72,7 @@ public final class NetDiag {
                 return isGameServer(monitor) ? tabPing : -1;
             }
         });
+        m.intervalMs = HudConfig.pingIntervalMs;
         monitor = m;
         m.start();
         return m;
@@ -60,21 +83,50 @@ public final class NetDiag {
         if (m != null) {
             m.stop();
         }
-        Traceroute tr = traceroute;
-        if (tr != null) {
-            tr.cancel();
-        }
+        ROUTES.stop();
     }
 
-    public static Traceroute startTraceroute(String address, int port) {
-        Traceroute old = traceroute;
-        if (old != null) {
-            old.cancel();
+    /** Starts a route analysis round now, at the user's request (may start the admin helper). */
+    public static void startRoutes(String address, int port) {
+        ROUTES.setIntervalSec(HudConfig.traceIntervalSec);
+        ROUTES.start(address, port, AdvancedTracing.helper(), true, System.currentTimeMillis());
+    }
+
+    /** The player's real ping: tab-list ping on the game server, else the measured median; NaN if unknown. */
+    public static double gamePing() {
+        PingMonitor m = monitor;
+        int tab = tabPing;
+        if (m != null && tab > 0 && isGameServer(m)) {
+            return tab;
         }
-        Traceroute tr = new Traceroute(address, port);
-        traceroute = tr;
-        tr.start();
-        return tr;
+        if (m != null) {
+            StatSummary p = m.snapshot().ping;
+            if (!p.isEmpty()) {
+                return p.median;
+            }
+        }
+        return Double.NaN;
+    }
+
+    /**
+     * Keeps a monitor running on the server you are on while the HUD is enabled and auto-start is on, so the HUD
+     * works without /snd. A monitor it started is stopped again if the HUD or auto-start is turned off.
+     */
+    private static void autoMonitor(Target g) {
+        if (g == null ? lastGameTarget != null : !g.equals(lastGameTarget)) {
+            userStopped = null; // joined another server (or left)
+        }
+        lastGameTarget = g;
+        PingMonitor m = monitor;
+        boolean running = m != null && !m.stopped();
+        boolean want = HudConfig.enabled && HudConfig.autoMonitor;
+        if (g != null && want && !running && !g.equals(userStopped)) {
+            monitor(g);
+            autoStarted = true;
+        } else if (running && autoStarted && !want) {
+            stop();
+            autoStarted = false;
+        }
     }
 
     /** Client tick: caches the tab-list ping and stops monitoring once you leave the server. */
@@ -82,7 +134,9 @@ public final class NetDiag {
         ServerData d = currentServer();
         gameTarget = targetOf(d);
         tabPing = readTabPing();
-        AdvancedTracing.tick();
+        autoMonitor(gameTarget);
+        ROUTES.setIntervalSec(HudConfig.traceIntervalSec);
+        ROUTES.tick(System.currentTimeMillis(), gamePing(), AdvancedTracing.helper());
         PingMonitor m = monitor;
         if (d == null && m != null && !m.stopped()) {
             stop();

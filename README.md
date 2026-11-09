@@ -66,8 +66,8 @@ Join a server and type `/snd`. Commands run locally and are never sent to the se
 |---|---|
 | `/snd` | Start monitoring the server you're on and open the monitor |
 | `/snd <host> [port]` | Monitor another server instead |
-| `/snd stop` | Stop pinging |
-| `/snd hud` | Drag the in-game ping line to a new spot, or turn it on/off (saved in `config/seekernetdiagnostics.cfg`) |
+| `/snd stop` | Stop pinging (it starts again on the next server you join) |
+| `/snd hud` | Drag the in-game ping line to a new spot, turn it on/off, and set auto-start |
 
 The monitor screen has:
 
@@ -90,6 +90,15 @@ The monitor screen has:
     list has to come from ICMP. If the TCP and ICMP paths reach the server at different hop counts, the
     screen says so.
   - **Enable Advanced Tracing (Admin)** (Windows, off by default): see below.
+  - **Updates in rounds.** Each round runs the TCP check, then (with Advanced Tracing) fresh traces of the
+    proxy's relays, then the ICMP traceroute. The first time, a step list with a progress bar shows instead of
+    half-finished results. After that, the last finished result stays on screen ("Updated 12:34:56, next in
+    40 s") while the next round runs in the background with a thin progress bar, so nothing changes mid-way.
+    The button next to the checkbox sets how often rounds repeat: every 15 s, 30 s, 1 min, 2 min, or off
+    (press `T` to refresh). The setting is saved in the config.
+  - **Relays only when a proxy carries the game.** Relays appear only when that round's TCP check verified
+    that a proxy carries your game connection, and only relays of that proxy are shown. With ExitLag (or any
+    optimizer) running but not carrying Minecraft, the tab says so and shows no relays.
 
 ### Advanced Tracing (Admin)
 
@@ -142,6 +151,14 @@ traffic sporadically, which can take up to 15 s to qualify as "in use".
 
 Buttons: Pause (`Space`), interval (0.5/1/2/5 s), Reset (`R`), Trace route (`T`), Copy summary (`C`).
 Closing the screen keeps pinging in the background with the HUD; `/snd` reopens it.
+
+**HUD:** the ping line shows whenever the mod is monitoring a server. With **Auto-start** on (the default),
+monitoring starts by itself when you join a server, so the HUD appears without typing `/snd`. It stops when you
+leave. `/snd stop` turns it off until you join another server. Turning the HUD off also stops pinging that
+auto-start began. It is hidden while F3 or a screen (chat, menus) is open.
+
+**Settings** are saved to `config/seekernetdiagnostics.cfg` as soon as you change them: HUD on/off and
+position, auto-start, ping interval, Advanced Tracing, route update interval, and which monitor tab opens.
 
 ## What the numbers mean
 

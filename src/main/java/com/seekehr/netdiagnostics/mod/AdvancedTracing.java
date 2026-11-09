@@ -1,9 +1,10 @@
 package com.seekehr.netdiagnostics.mod;
 
 import com.seekehr.netdiagnostics.SeekerNetDiagnostics;
-import com.seekehr.netdiagnostics.core.monitor.Traceroute;
 import com.seekehr.netdiagnostics.core.monitor.WinTcpTrace;
 import com.seekehr.netdiagnostics.helper.HelperClient;
+import com.seekehr.netdiagnostics.helper.Snapshot;
+import com.seekehr.netdiagnostics.route.RouteAnalysis;
 import com.seekehr.netdiagnostics.helper.HelperMain;
 import net.minecraftforge.fml.common.Loader;
 import net.minecraftforge.fml.common.ModContainer;
@@ -20,7 +21,49 @@ import java.util.Set;
  */
 public final class AdvancedTracing {
     private static final HelperClient CLIENT = new HelperClient();
-    private static int sentPid = -1;
+    private static final RouteAnalysis.Helper HELPER = new RouteAnalysis.Helper() {
+        @Override
+        public boolean wanted() {
+            return enabled();
+        }
+
+        @Override
+        public HelperClient.State state() {
+            return CLIENT.state();
+        }
+
+        @Override
+        public String message() {
+            return CLIENT.message();
+        }
+
+        @Override
+        public Snapshot snapshot() {
+            return CLIENT.snapshot();
+        }
+
+        @Override
+        public void focus(int pid) {
+            CLIENT.setProxyPid(pid);
+        }
+
+        @Override
+        public void retrace() {
+            CLIENT.retrace();
+        }
+
+        @Override
+        public void setServer(String ip, int port) {
+            CLIENT.setServer(ip, port);
+        }
+
+        @Override
+        public void ensureStarted() {
+            if (!CLIENT.active()) {
+                start();
+            }
+        }
+    };
 
     private AdvancedTracing() {
     }
@@ -48,31 +91,9 @@ public final class AdvancedTracing {
         }
     }
 
-    /** Called when a trace starts: points the helper at the server and starts it if enabled but not running. */
-    public static void onTrace(String ip, int port) {
-        CLIENT.setServer(ip, port);
-        if (!enabled()) {
-            return;
-        }
-        if (CLIENT.active()) {
-            CLIENT.retrace();
-        } else {
-            start();
-        }
-    }
-
-    /**
-     * Client tick: when the TCP check found which process took the game connection over (any proxy, known by name
-     * or not), tells the helper to follow that process's relays too.
-     */
-    static void tick() {
-        Traceroute tr = NetDiag.traceroute();
-        Traceroute.TcpResult t = tr == null ? null : tr.tcp();
-        if (t == null || t.acceptedPid <= 0 || t.acceptedPid == sentPid) {
-            return;
-        }
-        sentPid = t.acceptedPid;
-        CLIENT.setProxyPid(t.acceptedPid);
+    /** The bridge route analysis rounds use to talk to the helper. */
+    public static RouteAnalysis.Helper helper() {
+        return HELPER;
     }
 
     private static void start() {

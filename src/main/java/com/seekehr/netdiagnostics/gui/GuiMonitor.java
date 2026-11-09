@@ -10,6 +10,9 @@ import com.seekehr.netdiagnostics.helper.HelperClient;
 import com.seekehr.netdiagnostics.helper.RelayRanking;
 import com.seekehr.netdiagnostics.helper.Snapshot;
 import com.seekehr.netdiagnostics.mod.AdvancedTracing;
+import com.seekehr.netdiagnostics.mod.HudConfig;
+import com.seekehr.netdiagnostics.route.RouteAnalysis;
+import com.seekehr.netdiagnostics.route.RouteReport;
 import com.seekehr.netdiagnostics.mod.NetDiag;
 import net.minecraft.client.gui.GuiButton;
 import net.minecraft.client.gui.GuiScreen;
@@ -28,7 +31,7 @@ import java.util.Locale;
 /** The whole UI: live ping graph, statistics, the connection route and a system traceroute. */
 public final class GuiMonitor extends GuiBase {
     private static final int B_PAUSE = 0, B_INTERVAL = 1, B_RESET = 2, B_TRACE = 3, B_COPY = 4, B_CLOSE = 5;
-    private static final int B_TAB_ROUTE = 10, B_TAB_TRACE = 11, B_ADV = 12;
+    private static final int B_TAB_ROUTE = 10, B_TAB_TRACE = 11, B_ADV = 12, B_UPDATES = 13;
     /** Height taken by the Advanced Tracing checkbox at the top of the Traceroute tab. */
     private static final int ADV_H = 16;
     private static final int TILE_H = 22;
@@ -37,13 +40,15 @@ public final class GuiMonitor extends GuiBase {
     /** A 0 ms tab-list ping is never real: not reported yet, or faked by the server/proxy. Ignored in comparisons. */
     private static final String TAB_ZERO = "0 ms (not reported or faked, ignored)";
 
-    private static boolean traceTab;
+    /** Mirrors {@link HudConfig#traceTab}; saved whenever the tab changes. */
+    private static boolean traceTab = HudConfig.traceTab;
 
     private FlatButton pause;
     private FlatButton interval;
     private FlatButton tabRoute;
     private FlatButton tabTrace;
     private FlatButton adv;
+    private FlatButton updates;
     private int lw;
     private int rx;
     private int rw;
@@ -90,7 +95,11 @@ public final class GuiMonitor extends GuiBase {
         int tw = (rw - 4) / 2;
         tabRoute = button(B_TAB_ROUTE, rx, top, tw, 14, "Route", FlatButton.Style.TAB);
         tabTrace = button(B_TAB_TRACE, rx + tw + 4, top, rw - tw - 4, 14, "Traceroute", FlatButton.Style.TAB);
-        adv = button(B_ADV, rx + 5, top + 18 + 4, rw - 10, 12, "", FlatButton.Style.NORMAL)
+        int uw = Math.min(70, (rw - 10) / 3);
+        updates = button(B_UPDATES, rx + rw - 5 - uw, top + 18 + 4, uw, 12, "", FlatButton.Style.NORMAL)
+                .tip("How often the route is analysed again (15 s, 30 s, 1 min, 2 min, or off). Each update keeps "
+                        + "showing the previous result until the new one is complete.");
+        adv = button(B_ADV, rx + 5, top + 18 + 4, rw - 10 - uw - 4, 12, "", FlatButton.Style.NORMAL)
                 .tip("Starts a separate helper with administrator rights (Windows asks through UAC; Minecraft itself "
                         + "is not elevated). It captures packets to find the relays your proxy (ExitLag, NoPing, WTFast, "
                         + "a VPN or any program that takes the game connection over) really uses, picks the up to 3 "
@@ -111,6 +120,9 @@ public final class GuiMonitor extends GuiBase {
         adv.visible = traceTab;
         adv.enabled = AdvancedTracing.supported();
         adv.displayString = (AdvancedTracing.enabled() ? "[x] " : "[ ] ") + "Enable Advanced Tracing (Admin)";
+        updates.visible = traceTab;
+        int iv = HudConfig.traceIntervalSec;
+        updates.displayString = iv <= 0 ? "Updates: off" : "Every " + (iv % 60 == 0 ? iv / 60 + "m" : iv + "s");
     }
 
     @Override
@@ -138,6 +150,8 @@ public final class GuiMonitor extends GuiBase {
             case B_INTERVAL:
                 if (m != null) {
                     m.cycleInterval();
+                    HudConfig.pingIntervalMs = m.intervalMs;
+                    HudConfig.save();
                 }
                 break;
             case B_RESET:
@@ -159,19 +173,35 @@ public final class GuiMonitor extends GuiBase {
                 mc.displayGuiScreen(null);
                 break;
             case B_TAB_ROUTE:
-                traceTab = false;
+                setTraceTab(false);
                 break;
             case B_TAB_TRACE:
-                traceTab = true;
+                setTraceTab(true);
+                RouteAnalysis ra = NetDiag.routes();
+                if (m != null && m.address != null && ra.report() == null && !ra.running()) {
+                    NetDiag.startRoutes(m.address, m.connectPort);
+                }
                 break;
             case B_ADV:
                 boolean on = !AdvancedTracing.enabled();
                 AdvancedTracing.setEnabled(on);
-                if (on && m != null && m.address != null) {
-                    AdvancedTracing.onTrace(m.address, m.connectPort);
+                if (m != null && m.address != null) {
+                    NetDiag.startRoutes(m.address, m.connectPort); // fresh, consistent result for the new setting
                 }
                 toast(on ? "Approve the Windows prompt to start the helper" : "Advanced tracing off",
                         on ? Theme.ACCENT : Theme.TEXT_DIM);
+                break;
+            case B_UPDATES:
+                int cur = HudConfig.traceIntervalSec;
+                int next = RouteAnalysis.INTERVALS[0];
+                for (int i = 0; i < RouteAnalysis.INTERVALS.length; i++) {
+                    if (RouteAnalysis.INTERVALS[i] == cur) {
+                        next = RouteAnalysis.INTERVALS[(i + 1) % RouteAnalysis.INTERVALS.length];
+                    }
+                }
+                HudConfig.traceIntervalSec = next;
+                HudConfig.save();
+                NetDiag.routes().setIntervalSec(next);
                 break;
             default:
                 break;
@@ -179,14 +209,21 @@ public final class GuiMonitor extends GuiBase {
         refreshButtons();
     }
 
+    private static void setTraceTab(boolean on) {
+        traceTab = on;
+        if (HudConfig.traceTab != on) {
+            HudConfig.traceTab = on;
+            HudConfig.save();
+        }
+    }
+
     private void trace(PingMonitor m) {
         if (m == null || m.address == null) {
             toast("No server address yet", Theme.WARN);
             return;
         }
-        NetDiag.startTraceroute(m.address, m.connectPort);
-        AdvancedTracing.onTrace(m.address, m.connectPort);
-        traceTab = true;
+        NetDiag.startRoutes(m.address, m.connectPort);
+        setTraceTab(true);
         scroll = 0;
     }
 
@@ -576,7 +613,67 @@ public final class GuiMonitor extends GuiBase {
     }
 
     private void drawTrace(int x, int y, int w, int h, int mx, int my) {
-        List<Row> rows = traceRows(w);
+        RouteAnalysis ra = NetDiag.routes();
+        RouteReport report = ra.report();
+        RouteAnalysis.Progress pr = ra.progress();
+        if (report == null) {
+            if (pr == null) {
+                Draw.wrapped(fontRendererObj, "Press Trace route (T). TCP probes on the game port check whether a "
+                        + "proxy, optimizer or VPN carries the connection; with Advanced Tracing on, the relays it uses "
+                        + "are found and traced; the system traceroute (ICMP) lists the routers of your normal path. "
+                        + "Results appear once every step is done.", x, y, w, Theme.TEXT_DIM, 10);
+            } else {
+                drawLoading(pr, x, y, w);
+            }
+            return;
+        }
+        String status;
+        int sc;
+        if (pr != null) {
+            status = "Updating: " + pr.current();
+            sc = Theme.ACCENT;
+        } else {
+            long next = ra.nextUpdateAt();
+            status = "Updated " + new SimpleDateFormat("HH:mm:ss", Locale.ROOT).format(new Date(report.finishedAt))
+                    + (next < 0 ? ", auto-update off (T to refresh)"
+                    : ", next in " + Math.max(0, (next - System.currentTimeMillis() + 999) / 1000) + " s");
+            sc = Theme.TEXT_FAINT;
+        }
+        Draw.textClipped(fontRendererObj, status, x, y, w, sc);
+        if (pr != null) {
+            Draw.progress(x, y + ROW_H, w, 2, pr.fraction, Theme.ACCENT);
+        }
+        int listY = y + ROW_H + 4;
+        drawRows(reportRows(report, w), x, listY, w, h - (listY - y), mx, my);
+    }
+
+    /** First analysis: step list with a progress bar instead of half-finished results. */
+    private void drawLoading(RouteAnalysis.Progress pr, int x, int y, int w) {
+        int dots = (int) (System.currentTimeMillis() / 400 % 4);
+        Draw.text(fontRendererObj, "Deciphering routes" + "...".substring(0, dots), x, y, Theme.TEXT);
+        Draw.progress(x, y + 12, w, 4, pr.fraction, Theme.ACCENT);
+        String spin = String.valueOf("|/-\\".charAt((int) (System.currentTimeMillis() / 150 % 4)));
+        int yy = y + 22;
+        for (int i = 0; i < pr.labels.length; i++) {
+            int st = pr.states[i];
+            String mark = st == RouteAnalysis.Progress.DONE ? "[ok]" : st == RouteAnalysis.Progress.ACTIVE
+                    ? "[ " + spin + " ]" : st == RouteAnalysis.Progress.SKIPPED ? "[--]" : "[  ]";
+            int color = st == RouteAnalysis.Progress.DONE ? Theme.GOOD : st == RouteAnalysis.Progress.ACTIVE
+                    ? Theme.ACCENT : Theme.TEXT_FAINT;
+            Draw.textClipped(fontRendererObj, mark + "  " + pr.labels[i], x, yy, w, color);
+            yy += ROW_H;
+            String d = pr.details[i];
+            if (d != null && !d.isEmpty()) {
+                Draw.textClipped(fontRendererObj, "        " + d, x, yy, w, Theme.TEXT_DIM);
+                yy += ROW_H;
+            }
+            yy += 2;
+        }
+        Draw.wrapped(fontRendererObj, "Results appear when every step is done, so nothing changes half-way through.",
+                x, yy + 4, w, Theme.TEXT_FAINT, 3);
+    }
+
+    private void drawRows(List<Row> rows, int x, int y, int w, int h, int mx, int my) {
         int fit = Math.max(1, h / ROW_H);
         scroll = Math.max(0, Math.min(scroll, rows.size() - fit));
         int addrW = Math.min(w - 90, fontRendererObj.getStringWidth("255.255.255.255") + 6);
@@ -614,22 +711,12 @@ public final class GuiMonitor extends GuiBase {
         }
     }
 
-    private List<Row> traceRows(int w) {
+    private List<Row> reportRows(RouteReport report, int w) {
         List<Row> rows = new ArrayList<Row>();
-        Traceroute tr = NetDiag.traceroute();
-        if (tr == null) {
-            wrap(rows, "Press Trace route (T). TCP probes on the game port check whether a proxy, optimizer or VPN "
-                    + "carries the connection; the system traceroute (ICMP) then lists the routers of your normal "
-                    + "path. The ICMP hops are never a proxy's route.", Theme.TEXT_DIM, w);
-        } else {
-            text(rows, (tr.running() ? "Tracing " : "Route to ") + tr.destination + ":" + tr.port,
-                    tr.running() ? Theme.ACCENT : Theme.TEXT);
-            tcpRows(rows, tr, w);
-        }
-        advancedRows(rows, tr, w);
-        if (tr != null) {
-            icmpRows(rows, tr, w);
-        }
+        text(rows, "Route to " + report.destination + ":" + report.port, Theme.TEXT);
+        tcpRows(rows, report.trace, w);
+        advancedRows(rows, report, w);
+        icmpRows(rows, report.trace, w);
         return rows;
     }
 
@@ -666,100 +753,101 @@ public final class GuiMonitor extends GuiBase {
         wrap(rows, t.detail, Theme.TEXT_DIM, w);
     }
 
-    private void advancedRows(List<Row> rows, Traceroute tr, int w) {
-        HelperClient c = AdvancedTracing.client();
-        if (!AdvancedTracing.enabled() && !c.active()) {
+    private void advancedRows(List<Row> rows, RouteReport report, int w) {
+        if (!report.advancedUsed) {
+            if (report.proxyCarriesGame && AdvancedTracing.supported()) {
+                text(rows, "", Theme.TEXT);
+                wrap(rows, "Tick Enable Advanced Tracing (Admin) to see which " + report.proxyName
+                        + " relays carry the game.", Theme.TEXT_FAINT, w);
+            }
             return;
         }
         text(rows, "", Theme.TEXT);
         text(rows, "Advanced tracing (admin helper)", Theme.TEXT);
-        Snapshot s = c.snapshot();
-        HelperClient.State st = c.state();
-        int stColor = st == HelperClient.State.FAILED ? Theme.BAD : st == HelperClient.State.CONNECTED
-                ? (s != null && !s.captureOk ? Theme.WARN : Theme.GOOD) : Theme.TEXT_DIM;
-        String msg = c.message();
-        if (st == HelperClient.State.FAILED) {
-            msg += " Turn the checkbox off and on, or press T, to try again.";
+        if (report.advancedNote != null && !report.advancedNote.isEmpty()) {
+            wrap(rows, report.advancedNote, Theme.WARN, w);
         }
-        wrap(rows, msg, stColor, w);
-        if (s == null) {
+        if (!report.proxyCarriesGame) {
+            wrap(rows, "No relays: in this update your game connection does not go through a proxy, optimizer or "
+                    + "VPN, so none are shown (even if one is running for something else).", Theme.TEXT_DIM, w);
             return;
         }
-        if (!s.proxyRunning) {
-            wrap(rows, "No proxy, optimizer or VPN process found on this PC (none known by name, and the TCP check "
-                    + "did not see a process take the game connection over).", Theme.TEXT_DIM, w);
-        } else {
-            String names = s.proxyNames.isEmpty() ? "Proxy" : s.proxyNames;
-            List<String> probing = new ArrayList<String>();
-            List<String> idle = new ArrayList<String>();
-            for (Snapshot.Relay r : s.relays) {
-                if (!r.inUse && r.verified) {
-                    probing.add(r.protocol + " " + r.endpoint() + (r.service ? " (web/API)" : ""));
-                } else if (!r.inUse) {
-                    idle.add(r.protocol + " " + r.endpoint());
-                }
+        Snapshot s = report.snapshot;
+        if (s == null) {
+            return; // the note says why
+        }
+        String names = report.proxyName;
+        if (report.partial) {
+            wrap(rows, "Some relay traces did not finish in time; showing what was measured.", Theme.TEXT_FAINT, w);
+        }
+        List<String> probing = new ArrayList<String>();
+        List<String> idle = new ArrayList<String>();
+        for (Snapshot.Relay r : s.relays) {
+            if (!r.inUse && r.verified) {
+                probing.add(r.protocol + " " + r.endpoint() + (r.service ? " (web/API)" : ""));
+            } else if (!r.inUse) {
+                idle.add(r.protocol + " " + r.endpoint());
             }
-            double game = gamePing();
-            List<RelayRanking.Entry> ranked = RelayRanking.rank(s, game, RelayRanking.DEFAULT_MAX);
-            List<String> rejected = new ArrayList<String>();
-            int shown = 0;
-            text(rows, names + " relays carrying your game (best matches, up to " + RelayRanking.DEFAULT_MAX + ")",
-                    Theme.TEXT_DIM);
-            for (RelayRanking.Entry e : ranked) {
-                if (!e.accepted) {
-                    rejected.add(e.relay.protocol + " " + e.relay.endpoint() + ": " + e.reason);
-                    continue;
-                }
-                shown++;
-                Snapshot.Relay r = e.relay;
-                String lat = Double.isNaN(e.rttMs) ? "  (tracing...)" : String.format(Locale.ROOT, "  %s ms%s",
-                        ms(e.rttMs), Double.isNaN(e.beyondMs) ? "" : " +" + ms(e.beyondMs) + " ms in tunnel");
-                Row row = text(rows, shown + ". " + r.protocol + " " + r.endpoint() + lat, Theme.ACCENT);
-                List<String> tip = new ArrayList<String>(java.util.Arrays.asList(relayTip(r)));
-                tip.addAll(fontRendererObj.listFormattedStringToWidth(e.reason, 240));
-                row.tip = tip.toArray(new String[0]);
+        }
+        List<String> rejected = new ArrayList<String>();
+        int shown = 0;
+        text(rows, names + " relays carrying your game (best matches, up to " + RelayRanking.DEFAULT_MAX + ")",
+                Theme.TEXT_DIM);
+        for (RelayRanking.Entry e : report.ranked) {
+            if (!e.accepted) {
+                rejected.add(e.relay.protocol + " " + e.relay.endpoint() + ": " + e.reason);
+                continue;
             }
-            if (shown == 0) {
-                wrap(rows, "None right now: " + names + " isn't tunnelling the game. Join the server with it on.",
-                        Theme.TEXT_FAINT, w);
-            }
-            if (!rejected.isEmpty()) {
-                Row row = text(rows, rejected.size() + " other relay(s) in use left out (hover for why)",
-                        Theme.TEXT_FAINT);
-                row.tip = listTip("Left out:", wrapAll(rejected, 240));
-            }
-            if (!probing.isEmpty()) {
-                Row row = text(rows, names + " is also measuring " + probing.size()
-                        + " other relay(s) with short probes (not routes)", Theme.TEXT_FAINT);
-                row.tip = listTip("Measured, not in use:", probing);
-            }
-            if (!idle.isEmpty()) {
-                Row row = text(rows, names + " holds " + idle.size() + " idle TCP connection(s) (no traffic captured)",
-                        Theme.TEXT_FAINT);
-                row.tip = listTip("Idle connections (unverified):", idle);
-            }
-            for (RelayRanking.Entry e : ranked) {
-                if (!e.accepted) {
-                    continue;
-                }
-                if (e.path == null) {
-                    text(rows, "Path to relay " + e.relay.endpoint() + ": waiting to trace...", Theme.TEXT_DIM);
-                } else {
-                    pathRows(rows, e.path, w);
-                }
+            shown++;
+            Snapshot.Relay r = e.relay;
+            String lat = Double.isNaN(e.rttMs) ? "  (not traced)" : String.format(Locale.ROOT, "  %s ms%s",
+                    ms(e.rttMs), Double.isNaN(e.beyondMs) ? "" : " +" + ms(e.beyondMs) + " ms in tunnel");
+            Row row = text(rows, shown + ". " + r.protocol + " " + r.endpoint() + lat, Theme.ACCENT);
+            List<String> tip = new ArrayList<String>(java.util.Arrays.asList(relayTip(r)));
+            tip.addAll(fontRendererObj.listFormattedStringToWidth(e.reason, 240));
+            row.tip = tip.toArray(new String[0]);
+        }
+        if (shown == 0) {
+            wrap(rows, "None found: " + names + " carries the game, but no relay with steady traffic was seen during "
+                    + "this update.", Theme.TEXT_FAINT, w);
+        }
+        if (!rejected.isEmpty()) {
+            Row row = text(rows, rejected.size() + " other relay(s) in use left out (hover for why)",
+                    Theme.TEXT_FAINT);
+            row.tip = listTip("Left out:", wrapAll(rejected, 240));
+        }
+        if (!probing.isEmpty()) {
+            Row row = text(rows, names + " is also measuring " + probing.size()
+                    + " other relay(s) with short probes (not routes)", Theme.TEXT_FAINT);
+            row.tip = listTip("Measured, not in use:", probing);
+        }
+        if (!idle.isEmpty()) {
+            Row row = text(rows, names + " holds " + idle.size() + " idle TCP connection(s) (no traffic captured)",
+                    Theme.TEXT_FAINT);
+            row.tip = listTip("Idle connections (unverified):", idle);
+        }
+        for (RelayRanking.Entry e : report.ranked) {
+            if (e.accepted && e.path != null) {
+                pathRows(rows, e.path, w);
             }
         }
         for (Snapshot.Path p : s.paths) {
-            if ("server".equals(p.kind) && (tr == null || p.target.equals(tr.destination))) {
+            if ("server".equals(p.kind) && p.target.equals(report.destination)) {
                 pathRows(rows, p, w);
             }
         }
-        if (!s.events.isEmpty()) {
+        List<Snapshot.Event> evs = new ArrayList<Snapshot.Event>();
+        for (Snapshot.Event e : s.events) {
+            if (e.text.startsWith(names) || e.text.startsWith("Path to ") || e.text.startsWith("Busiest relay")) {
+                evs.add(e);
+            }
+        }
+        if (!evs.isEmpty()) {
             text(rows, "", Theme.TEXT);
             text(rows, "Route changes", Theme.TEXT);
             SimpleDateFormat f = new SimpleDateFormat("HH:mm:ss", Locale.ROOT);
-            for (int i = s.events.size() - 1, n = 0; i >= 0 && n < 8; i--, n++) {
-                Snapshot.Event e = s.events.get(i);
+            for (int i = evs.size() - 1, n = 0; i >= 0 && n < 8; i--, n++) {
+                Snapshot.Event e = evs.get(i);
                 text(rows, f.format(new Date(e.time)) + "  " + e.text, Theme.TEXT_DIM);
             }
         }
@@ -871,22 +959,6 @@ public final class GuiMonitor extends GuiBase {
         return t.toArray(new String[0]);
     }
 
-    /** The player's real ping: the tab-list ping on the game server, else the measured median; NaN if unknown. */
-    private static double gamePing() {
-        PingMonitor m = NetDiag.monitor();
-        int tab = NetDiag.tabPing();
-        if (m != null && tab > 0 && NetDiag.isGameServer(m)) {
-            return tab;
-        }
-        if (m != null) {
-            StatSummary p = m.snapshot().ping;
-            if (!p.isEmpty()) {
-                return p.median;
-            }
-        }
-        return Double.NaN;
-    }
-
     private List<String> wrapAll(List<String> items, int width) {
         List<String> out = new ArrayList<String>();
         for (String i : items) {
@@ -974,20 +1046,28 @@ public final class GuiMonitor extends GuiBase {
             int tab = NetDiag.tabPing();
             sb.append("Tab-list ping: ").append(tab == 0 ? TAB_ZERO : tab + " ms").append('\n');
         }
-        Traceroute tr = NetDiag.traceroute();
+        RouteReport report = NetDiag.routes().report();
+        Traceroute tr = report == null ? null : report.trace;
+        if (report != null) {
+            sb.append("Route analysis at ").append(new SimpleDateFormat("HH:mm:ss", Locale.ROOT)
+                    .format(new Date(report.finishedAt))).append('\n');
+        }
         if (tr != null && tr.tcp() != null) {
             Traceroute.TcpResult t = tr.tcp();
             sb.append("TCP check to ").append(tr.destination).append(':').append(tr.port).append(": ")
                     .append(t.verdict).append(" - ").append(t.detail).append('\n');
         }
-        Snapshot adv = AdvancedTracing.client().snapshot();
+        Snapshot adv = report == null ? null : report.snapshot;
+        if (report != null && report.advancedUsed && !report.proxyCarriesGame) {
+            sb.append("Relays: none (the game connection does not go through a proxy)\n");
+        }
         if (adv != null) {
             sb.append("Advanced tracing: ").append(adv.status).append('\n');
-            double game = gamePing();
+            double game = report.gamePing;
             if (!Double.isNaN(game)) {
                 sb.append(String.format(Locale.ROOT, "Game ping used for relay matching: %.0f ms%n", game));
             }
-            List<RelayRanking.Entry> ranked = RelayRanking.rank(adv, game, RelayRanking.DEFAULT_MAX);
+            List<RelayRanking.Entry> ranked = report.ranked;
             int n = 0;
             for (RelayRanking.Entry e : ranked) {
                 if (!e.accepted) {
