@@ -47,10 +47,6 @@ public final class PingHud {
             this.value = value;
             this.valueColor = valueColor;
         }
-
-        String text() {
-            return label + ": " + value;
-        }
     }
 
     /** Builds the entries to show. A null snapshot gives sample values for previews. */
@@ -115,28 +111,108 @@ public final class PingHud {
         return Double.isNaN(v) ? "-" : String.format(Locale.ROOT, "%.0fms", v);
     }
 
-    /** Lines of entries: one line with every entry, or one entry per line when stacked. */
-    private static List<List<Item>> lines(PingMonitor.Snapshot s) {
-        List<Item> items = items(s);
-        List<List<Item>> lines = new ArrayList<List<Item>>();
-        if (HudConfig.stacked) {
-            for (Item it : items) {
-                List<Item> one = new ArrayList<Item>();
-                one.add(it);
-                lines.add(one);
+    /** One row of the HUD, with the "  Label: " heads pre-built so drawing allocates nothing. */
+    private static final class Line {
+        final String[] heads;
+        final String[] values;
+        final int[] valueColors;
+
+        Line(List<Item> items) {
+            int n = items.size();
+            heads = new String[n];
+            values = new String[n];
+            valueColors = new int[n];
+            for (int i = 0; i < n; i++) {
+                Item it = items.get(i);
+                heads[i] = (i > 0 ? SEP : "") + it.label + ": ";
+                values[i] = it.value;
+                valueColors[i] = it.valueColor;
             }
-        } else {
-            lines.add(items);
         }
-        return lines;
+
+        int width(FontRenderer fr) {
+            int w = 0;
+            for (int i = 0; i < heads.length; i++) {
+                w += fr.getStringWidth(heads[i]) + fr.getStringWidth(values[i]);
+            }
+            return w;
+        }
     }
 
-    private static int lineWidth(FontRenderer fr, List<Item> line) {
-        int w = 0;
-        for (int i = 0; i < line.size(); i++) {
-            w += fr.getStringWidth((i > 0 ? SEP : "") + line.get(i).text());
+    /**
+     * Text and unscaled size of the HUD for one snapshot and one set of content settings. Rebuilt only when a new
+     * sample arrives or a setting that changes the content or size changes, not every frame.
+     */
+    private static final class Layout {
+        final PingMonitor.Snapshot snapshot;
+        final FontRenderer font;
+        final boolean unicode;
+        final int contentKey;
+        final List<Line> lines = new ArrayList<Line>();
+        final int rawW;
+        final int rawH;
+        int sizeScale = -1;
+        final int[] size = new int[2];
+
+        Layout(FontRenderer fr, PingMonitor.Snapshot s, int key) {
+            snapshot = s;
+            font = fr;
+            unicode = fr.getUnicodeFlag();
+            contentKey = key;
+            List<Item> items = items(s);
+            if (HudConfig.stacked) {
+                for (Item it : items) {
+                    List<Item> one = new ArrayList<Item>(1);
+                    one.add(it);
+                    lines.add(new Line(one));
+                }
+            } else {
+                lines.add(new Line(items));
+            }
+            int w = 0;
+            for (Line l : lines) {
+                w = Math.max(w, l.width(fr));
+            }
+            int h = lines.size() * (fr.FONT_HEIGHT + 1) - 1;
+            if (boxed()) {
+                w += PAD_X * 2 + (HudConfig.style == STYLE_BAR ? BAR_W : 0);
+                h += PAD_Y * 2;
+            }
+            rawW = w;
+            rawH = h;
         }
-        return w;
+
+        boolean matches(FontRenderer fr, PingMonitor.Snapshot s, int key) {
+            return snapshot == s && font == fr && unicode == fr.getUnicodeFlag() && contentKey == key;
+        }
+    }
+
+    /** HUD layouts are only built and drawn on the render thread. */
+    private static Layout layout;
+
+    /** Packs every setting that changes the HUD's text or unscaled size. */
+    private static int contentKey() {
+        int k = HudConfig.style & 0xFF;
+        k = k << 1 | (HudConfig.stacked ? 1 : 0);
+        k = k << 1 | (HudConfig.latencyColors ? 1 : 0);
+        k = k << 1 | (HudConfig.showAvg ? 1 : 0);
+        k = k << 1 | (HudConfig.showMin ? 1 : 0);
+        k = k << 1 | (HudConfig.showMax ? 1 : 0);
+        k = k << 1 | (HudConfig.showJitter ? 1 : 0);
+        k = k << 1 | (HudConfig.showLoss ? 1 : 0);
+        k = k << 1 | (HudConfig.showConnect ? 1 : 0);
+        k = k << 1 | (HudConfig.showTabPing ? 1 : 0);
+        return k;
+    }
+
+    private static Layout layout(FontRenderer fr, PingMonitor.Snapshot s) {
+        int key = contentKey();
+        Layout l = layout;
+        if (l == null || !l.matches(fr, s, key)) {
+            l = new Layout(fr, s, key);
+            layout = l;
+        }
+        return l;
     }
 
     private static boolean boxed() {
@@ -147,31 +223,25 @@ public final class PingHud {
         return HudConfig.scalePercent / 100f;
     }
 
-    /** Unscaled size {width, height} of the HUD for these lines. */
-    private static int[] rawSize(FontRenderer fr, List<List<Item>> lines) {
-        int w = 0;
-        for (List<Item> l : lines) {
-            w = Math.max(w, lineWidth(fr, l));
-        }
-        int h = lines.size() * (fr.FONT_HEIGHT + 1) - 1;
-        if (boxed()) {
-            w += PAD_X * 2 + (HudConfig.style == STYLE_BAR ? BAR_W : 0);
-            h += PAD_Y * 2;
-        }
-        return new int[]{w, h};
-    }
-
-    /** On-screen size {width, height} of the HUD, scale included. A null snapshot measures the preview. */
+    /**
+     * On-screen size {width, height} of the HUD, scale included. A null snapshot measures the preview. The returned
+     * array is cached and shared: read it, do not modify or keep it.
+     */
     public static int[] size(FontRenderer fr, PingMonitor.Snapshot s) {
-        int[] r = rawSize(fr, lines(s));
-        return new int[]{(int) Math.ceil(r[0] * scale()), (int) Math.ceil(r[1] * scale())};
+        Layout l = layout(fr, s);
+        if (l.sizeScale != HudConfig.scalePercent) {
+            l.size[0] = (int) Math.ceil(l.rawW * scale());
+            l.size[1] = (int) Math.ceil(l.rawH * scale());
+            l.sizeScale = HudConfig.scalePercent;
+        }
+        return l.size;
     }
 
     /** Draws the HUD with its top-left corner at (x, y). A null snapshot draws sample values. */
     public static void draw(FontRenderer fr, int x, int y, PingMonitor.Snapshot s) {
-        List<List<Item>> lines = lines(s);
-        int[] size = rawSize(fr, lines);
+        Layout l = layout(fr, s);
         int text = COLORS[HudConfig.textColor];
+        boolean shadow = HudConfig.shadow;
         GlStateManager.pushMatrix();
         GlStateManager.translate(x, y, 0);
         float sc = scale();
@@ -180,29 +250,29 @@ public final class PingHud {
         int tx = 0;
         int ty = 0;
         if (HudConfig.style == STYLE_BOX) {
-            Draw.rect(0, 0, size[0], size[1], bg);
+            Draw.rect(0, 0, l.rawW, l.rawH, bg);
         } else if (HudConfig.style == STYLE_ROUNDED) {
-            Draw.roundRect(0, 0, size[0], size[1], 3, bg);
+            Draw.roundRect(0, 0, l.rawW, l.rawH, 3, bg);
         } else if (HudConfig.style == STYLE_BAR) {
-            Draw.rect(0, 0, size[0], size[1], bg);
+            Draw.rect(0, 0, l.rawW, l.rawH, bg);
             PingMonitor.Sample last = s == null ? null : s.last();
             int accent = s == null ? Theme.latencyColor(103)
                     : last == null || !last.ok() ? Theme.BAD : Theme.latencyColor(last.pingMs);
-            Draw.rect(0, 0, BAR_W, size[1], accent);
+            Draw.rect(0, 0, BAR_W, l.rawH, accent);
             tx = BAR_W;
         }
         if (boxed()) {
             tx += PAD_X;
             ty += PAD_Y;
         }
-        for (List<Item> line : lines) {
+        int shadowFix = shadow ? 1 : 0;
+        for (int li = 0; li < l.lines.size(); li++) {
+            Line line = l.lines.get(li);
             float cx = tx;
-            for (int i = 0; i < line.size(); i++) {
-                Item it = line.get(i);
-                String head = (i > 0 ? SEP : "") + it.label + ": ";
-                cx = fr.drawString(head, cx, ty, text, HudConfig.shadow) - (HudConfig.shadow ? 1 : 0);
-                cx = fr.drawString(it.value, cx, ty, it.valueColor != 0 ? it.valueColor : text, HudConfig.shadow)
-                        - (HudConfig.shadow ? 1 : 0);
+            for (int i = 0; i < line.heads.length; i++) {
+                cx = fr.drawString(line.heads[i], cx, ty, text, shadow) - shadowFix;
+                int vc = line.valueColors[i];
+                cx = fr.drawString(line.values[i], cx, ty, vc != 0 ? vc : text, shadow) - shadowFix;
             }
             ty += fr.FONT_HEIGHT + 1;
         }
