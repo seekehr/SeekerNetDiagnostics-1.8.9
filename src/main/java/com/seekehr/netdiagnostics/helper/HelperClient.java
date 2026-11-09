@@ -45,6 +45,7 @@ public final class HelperClient {
     private volatile String serverIp;
     private volatile int serverPort;
     private volatile long connectedAt;
+    private volatile int proxyPid = -1;
     private int generation;
 
     public State state() {
@@ -112,6 +113,12 @@ public final class HelperClient {
         serverIp = ip;
         serverPort = port;
         send("SERVER", ip, String.valueOf(port));
+    }
+
+    /** Tells the helper that process {@code pid} took the game connection over (kept and re-sent). */
+    public void setProxyPid(int pid) {
+        proxyPid = pid;
+        send("PROXY", String.valueOf(pid));
     }
 
     public void retrace() {
@@ -228,6 +235,9 @@ public final class HelperClient {
             }
             if (serverIp != null) {
                 send("SERVER", serverIp, String.valueOf(serverPort));
+            }
+            if (proxyPid > 0) {
+                send("PROXY", String.valueOf(proxyPid));
             }
             List<String> batch = new ArrayList<String>();
             String line;

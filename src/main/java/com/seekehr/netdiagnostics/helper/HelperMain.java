@@ -19,7 +19,7 @@ import java.nio.charset.Charset;
  * <p>Pass {@code --no-firewall} as a third argument to skip the temporary ICMP firewall rule ({@link Firewall}).
  *
  * <p>The helper connects to the mod on 127.0.0.1:{@code port}, proves itself with {@code token}, and then sends a
- * {@link Snapshot} every 2 s. It accepts only three commands (SERVER ip port, RETRACE, QUIT), validates them, and
+ * {@link Snapshot} every 2 s. It accepts only four commands (SERVER ip port, PROXY pid, RETRACE, QUIT), validates them, and
  * exits as soon as the connection closes, so it never outlives the game.
  */
 public final class HelperMain {
@@ -91,6 +91,12 @@ public final class HelperMain {
                         } else if ("SERVER".equals(f[0]) && f.length >= 3 && mon != null) {
                             try {
                                 mon.setServer(f[1], Integer.parseInt(f[2]));
+                            } catch (NumberFormatException ignored) {
+                                // invalid command
+                            }
+                        } else if ("PROXY".equals(f[0]) && f.length >= 2 && mon != null) {
+                            try {
+                                mon.addProxyPid(Integer.parseInt(f[1]));
                             } catch (NumberFormatException ignored) {
                                 // invalid command
                             }

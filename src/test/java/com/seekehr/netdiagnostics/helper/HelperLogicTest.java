@@ -1,5 +1,6 @@
 package com.seekehr.netdiagnostics.helper;
 
+import com.seekehr.netdiagnostics.core.monitor.Proxies;
 import org.junit.Test;
 
 import java.net.Inet4Address;
@@ -103,7 +104,8 @@ public class HelperLogicTest {
         s.captureOk = true;
         s.status = "Capturing on [192.168.1.5]";
         s.icmpSeen = true;
-        s.exitLagRunning = true;
+        s.proxyRunning = true;
+        s.proxyNames = "ExitLag, NoPing";
         Snapshot.Relay r = new Snapshot.Relay();
         r.protocol = "TCP";
         r.ip = "1.2.3.4";
@@ -115,6 +117,7 @@ public class HelperLogicTest {
         r.inUse = true;
         r.primary = true;
         r.activeSeconds = 90;
+        r.connSeconds = 75;
         r.lastSeenAgoMs = 100;
         r.pathKey = RelayMonitor.relayKey("TCP", "1.2.3.4", 22184);
         s.relays.add(r);
@@ -148,11 +151,13 @@ public class HelperLogicTest {
         List<String> lines = s.encode();
         assertEquals("END", lines.get(lines.size() - 1));
         Snapshot d = Snapshot.decode(lines.subList(0, lines.size() - 1));
-        assertTrue(d.captureOk && d.icmpSeen && d.exitLagRunning);
+        assertTrue(d.captureOk && d.icmpSeen && d.proxyRunning);
+        assertEquals("ExitLag, NoPing", d.proxyNames);
         Snapshot.Relay dr = d.relays.get(0);
         assertEquals("1.2.3.4:22184", dr.endpoint());
         assertTrue(dr.inUse && dr.primary && dr.verified);
         assertEquals(90, dr.activeSeconds);
+        assertEquals(75, dr.connSeconds);
         assertEquals(20.5, dr.packetsOutPerSec, 1e-9);
         Snapshot.Path dp = d.path(dr.pathKey);
         assertEquals("Reached\twith tab", dp.note);
@@ -193,10 +198,12 @@ public class HelperLogicTest {
     public void relaySetChangesBecomeEvents() {
         Set<String> before = new LinkedHashSet<String>(Arrays.asList("TCP 1.1.1.1:1", "TCP 2.2.2.2:2"));
         Set<String> after = new LinkedHashSet<String>(Arrays.asList("TCP 2.2.2.2:2", "UDP 3.3.3.3:3"));
-        List<String> ev = RelayMonitor.diffActive(before, after);
-        assertEquals(Arrays.asList("ExitLag started routing through relay UDP 3.3.3.3:3",
-                "ExitLag stopped routing through relay TCP 1.1.1.1:1"), ev);
-        assertTrue(RelayMonitor.diffActive(after, after).isEmpty());
+        Map<String, String> labels = new HashMap<String, String>();
+        labels.put("UDP 3.3.3.3:3", "NoPing");
+        List<String> ev = RelayMonitor.diffActive(before, after, labels);
+        assertEquals(Arrays.asList("NoPing started routing through relay UDP 3.3.3.3:3",
+                "The proxy stopped routing through relay TCP 1.1.1.1:1"), ev);
+        assertTrue(RelayMonitor.diffActive(after, after, labels).isEmpty());
     }
 
     private static Snapshot.Hop hop(int ttl, String addr, boolean dest) {
@@ -258,11 +265,17 @@ public class HelperLogicTest {
     }
 
     @Test
-    public void exitLagNameMatch() {
-        assertTrue(RelayMonitor.isExitLag("ExitLag.exe"));
-        assertTrue(RelayMonitor.isExitLag("exitlag-service.exe"));
-        assertFalse(RelayMonitor.isExitLag("javaw.exe"));
-        assertFalse(RelayMonitor.isExitLag(null));
+    public void knownProxyNames() {
+        assertEquals("ExitLag", Proxies.known("ExitLag.exe"));
+        assertEquals("ExitLag", Proxies.known("ExitLagPmService.exe"));
+        assertEquals("NoPing", Proxies.known("NoPing.exe (pid 4)"));
+        assertEquals("WireGuard", Proxies.known("wireguard.exe"));
+        assertNull(Proxies.known("javaw.exe"));
+        assertNull(Proxies.known(null));
+        assertEquals("MyTunnel", Proxies.label("MyTunnel.exe (pid 12)"));
+        assertTrue(Proxies.tunnelAdapter("WireGuard Tunnel"));
+        assertTrue(Proxies.tunnelAdapter("TAP-Windows Adapter V9"));
+        assertFalse(Proxies.tunnelAdapter("Realtek Gaming GbE Family Controller"));
     }
 
     // ------------------------------------------------------------------ hop aggregation

@@ -18,7 +18,7 @@ public class TcpTraceAssessTest {
 
     private static Traceroute.TcpResult assess(Traceroute.Probes p, boolean ttl1, String by, String adapter,
                                                boolean running, int hops, List<String> eps) {
-        return Traceroute.assess(p, ttl1, by, adapter, running, false, hops, RTT, eps, 25565);
+        return Traceroute.assess(p, ttl1, by, adapter, running ? "ExitLag" : "", false, hops, RTT, eps, 25565);
     }
 
     @Test
@@ -35,25 +35,47 @@ public class TcpTraceAssessTest {
         List<String> eps = Arrays.asList("1.2.3.4:22184");
         Traceroute.TcpResult r = assess(Traceroute.Probes.REACHED, true, "ExitLag.exe (pid 42)", "Ethernet", true,
                 -1, eps);
-        assertEquals(Traceroute.Verdict.EXITLAG_VERIFIED, r.verdict);
+        assertEquals(Traceroute.Verdict.PROXY_VERIFIED, r.verdict);
+        assertEquals("ExitLag", r.proxyName);
         assertTrue(r.detail.contains("ExitLag.exe (pid 42)"));
         assertTrue(r.detail.contains("1.2.3.4:22184"));
         assertEquals(-1, r.hopDistance);
     }
 
     @Test
-    public void unknownInterceptionIsNotLabelledExitLag() {
+    public void unidentifiedInterceptionIsNotNamed() {
         Traceroute.TcpResult r = assess(Traceroute.Probes.REACHED, true, null, "Ethernet", true, -1, NONE);
         assertEquals(Traceroute.Verdict.LOCAL_PROXY, r.verdict);
         assertTrue(r.detail.contains("could not be verified"));
-        r = assess(Traceroute.Probes.REACHED, false, "SomeVpn.exe (pid 9)", "Ethernet", false, 5, NONE);
-        assertEquals(Traceroute.Verdict.LOCAL_PROXY, r.verdict);
+        assertNull(r.proxyName);
+    }
+
+    @Test
+    public void anyIdentifiedProcessIsVerifiedByName() {
+        Traceroute.TcpResult r = assess(Traceroute.Probes.REACHED, false, "NoPing.exe (pid 9)", "Ethernet", false, 5,
+                NONE);
+        assertEquals(Traceroute.Verdict.PROXY_VERIFIED, r.verdict);
+        assertEquals("NoPing", r.proxyName);
+        assertEquals(9, r.acceptedPid);
+        r = assess(Traceroute.Probes.REACHED, true, "MyTunnel.exe (pid 77)", "Ethernet", false, -1, NONE);
+        assertEquals("MyTunnel", r.proxyName);
+        assertEquals(77, r.acceptedPid);
+    }
+
+    @Test
+    public void vpnAdapterIsVerified() {
+        Traceroute.TcpResult r = assess(Traceroute.Probes.REACHED, false, null, "Wintun Userspace Tunnel", false, 12,
+                NONE);
+        assertEquals(Traceroute.Verdict.PROXY_VERIFIED, r.verdict);
+        assertEquals(12, r.hopDistance);
+        assertEquals(Traceroute.Verdict.DIRECT,
+                assess(Traceroute.Probes.REACHED, false, null, "Realtek Gaming GbE", false, 7, NONE).verdict);
     }
 
     @Test
     public void exitLagAdapterIsVerified() {
         Traceroute.TcpResult r = assess(Traceroute.Probes.REACHED, false, null, "ExitLag Tap Adapter", true, 9, NONE);
-        assertEquals(Traceroute.Verdict.EXITLAG_VERIFIED, r.verdict);
+        assertEquals(Traceroute.Verdict.PROXY_VERIFIED, r.verdict);
         assertEquals(9, r.hopDistance);
     }
 

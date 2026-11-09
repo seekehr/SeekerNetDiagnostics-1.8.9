@@ -1,6 +1,7 @@
 package com.seekehr.netdiagnostics.mod;
 
 import com.seekehr.netdiagnostics.SeekerNetDiagnostics;
+import com.seekehr.netdiagnostics.core.monitor.Traceroute;
 import com.seekehr.netdiagnostics.core.monitor.WinTcpTrace;
 import com.seekehr.netdiagnostics.helper.HelperClient;
 import com.seekehr.netdiagnostics.helper.HelperMain;
@@ -19,6 +20,7 @@ import java.util.Set;
  */
 public final class AdvancedTracing {
     private static final HelperClient CLIENT = new HelperClient();
+    private static int sentPid = -1;
 
     private AdvancedTracing() {
     }
@@ -57,6 +59,20 @@ public final class AdvancedTracing {
         } else {
             start();
         }
+    }
+
+    /**
+     * Client tick: when the TCP check found which process took the game connection over (any proxy, known by name
+     * or not), tells the helper to follow that process's relays too.
+     */
+    static void tick() {
+        Traceroute tr = NetDiag.traceroute();
+        Traceroute.TcpResult t = tr == null ? null : tr.tcp();
+        if (t == null || t.acceptedPid <= 0 || t.acceptedPid == sentPid) {
+            return;
+        }
+        sentPid = t.acceptedPid;
+        CLIENT.setProxyPid(t.acceptedPid);
     }
 
     private static void start() {

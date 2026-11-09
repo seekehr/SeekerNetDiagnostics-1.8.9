@@ -7,6 +7,7 @@ import com.seekehr.netdiagnostics.core.monitor.PingMonitor;
 import com.seekehr.netdiagnostics.core.monitor.Traceroute;
 import com.seekehr.netdiagnostics.core.stats.StatSummary;
 import com.seekehr.netdiagnostics.helper.HelperClient;
+import com.seekehr.netdiagnostics.helper.RelayRanking;
 import com.seekehr.netdiagnostics.helper.Snapshot;
 import com.seekehr.netdiagnostics.mod.AdvancedTracing;
 import com.seekehr.netdiagnostics.mod.NetDiag;
@@ -80,9 +81,9 @@ public final class GuiMonitor extends GuiBase {
                 .tip("Time between pings. Each ping is a new connection; never faster than 0.5 s.");
         button(B_RESET, 8 + (bw + 4) * 2, by, bw, 14, "Reset", FlatButton.Style.NORMAL).tip("Clear samples and stats (R)");
         button(B_TRACE, 8 + (bw + 4) * 3, by, bw, 14, "Trace route", FlatButton.Style.NORMAL)
-                .tip("Trace the route to the server (T): TCP probes on the game port check whether ExitLag or "
-                        + "another local proxy carries it, and the system traceroute (ICMP) lists the routers of your "
-                        + "normal ISP path.");
+                .tip("Trace the route to the server (T): TCP probes on the game port check whether a proxy, "
+                        + "optimizer (ExitLag, NoPing, WTFast...) or VPN carries it, and the system traceroute (ICMP) "
+                        + "lists the routers of your normal ISP path.");
         button(B_COPY, 8 + (bw + 4) * 4, by, bw, 14, "Copy", FlatButton.Style.NORMAL).tip("Copy a text summary (C)");
         button(B_CLOSE, 8 + (bw + 4) * 5, by, bw, 14, "Close", FlatButton.Style.GHOST)
                 .tip("Close. Pinging continues in the background with a HUD; /snd stop to end it.");
@@ -91,10 +92,11 @@ public final class GuiMonitor extends GuiBase {
         tabTrace = button(B_TAB_TRACE, rx + tw + 4, top, rw - tw - 4, 14, "Traceroute", FlatButton.Style.TAB);
         adv = button(B_ADV, rx + 5, top + 18 + 4, rw - 10, 12, "", FlatButton.Style.NORMAL)
                 .tip("Starts a separate helper with administrator rights (Windows asks through UAC; Minecraft itself "
-                        + "is not elevated). It captures packets to find the relays ExitLag really uses, traces the "
-                        + "routers to them, and watches for route changes. While it runs, it adds a temporary Windows "
+                        + "is not elevated). It captures packets to find the relays your proxy (ExitLag, NoPing, WTFast, "
+                        + "a VPN or any program that takes the game connection over) really uses, picks the up to 3 "
+                        + "that match your game ping, traces the routers to them, and watches for route changes. While it runs, it adds a temporary Windows "
                         + "Firewall rule so that Java can receive ICMP error replies (types 3 and 11 only); the rule is "
-                        + "removed when it stops. Hops inside ExitLag's tunnel are never shown: they cannot be seen.");
+                        + "removed when it stops. Hops inside the proxy's tunnel are never shown: they cannot be seen.");
         refreshButtons();
     }
 
@@ -520,7 +522,7 @@ public final class GuiMonitor extends GuiBase {
         StatSummary c = s.connect;
         rows.add(new String[]{"TCP connect", c.isEmpty() ? "-" : String.format(Locale.ROOT, "%.2f ms median", c.median)});
         rows.add(new String[]{"Path", c.isEmpty() ? "-" : m.localProxyDetected(s)
-                ? "local proxy (ExitLag/VPN) intercepts" : "direct to server"});
+                ? "local proxy (ExitLag/VPN/optimizer) intercepts" : "direct to server"});
         if (game) {
             int tab = NetDiag.tabPing();
             String v = tab < 0 ? "-" : tab == 0 ? TAB_ZERO : tab + " ms";
@@ -616,9 +618,9 @@ public final class GuiMonitor extends GuiBase {
         List<Row> rows = new ArrayList<Row>();
         Traceroute tr = NetDiag.traceroute();
         if (tr == null) {
-            wrap(rows, "Press Trace route (T). TCP probes on the game port check whether ExitLag or another local "
-                    + "proxy carries the connection; the system traceroute (ICMP) then lists the routers of your normal "
-                    + "path. The ICMP hops are never ExitLag's route.", Theme.TEXT_DIM, w);
+            wrap(rows, "Press Trace route (T). TCP probes on the game port check whether a proxy, optimizer or VPN "
+                    + "carries the connection; the system traceroute (ICMP) then lists the routers of your normal "
+                    + "path. The ICMP hops are never a proxy's route.", Theme.TEXT_DIM, w);
         } else {
             text(rows, (tr.running() ? "Tracing " : "Route to ") + tr.destination + ":" + tr.port,
                     tr.running() ? Theme.ACCENT : Theme.TEXT);
@@ -643,20 +645,20 @@ public final class GuiMonitor extends GuiBase {
         String title;
         int color;
         switch (t.verdict) {
-            case EXITLAG_VERIFIED:
-                title = "TCP: ExitLag-routed (verified)" + at + rtt;
+            case PROXY_VERIFIED:
+                title = "TCP: via " + t.proxyName + " (verified)" + at + rtt;
                 color = Theme.ACCENT;
                 break;
             case LOCAL_PROXY:
-                title = "TCP: local proxy, ExitLag not verified" + rtt;
+                title = "TCP: unidentified local proxy" + rtt;
                 color = Theme.WARN;
                 break;
             case DIRECT:
-                title = "TCP: direct, not via ExitLag" + at + rtt;
+                title = "TCP: direct, no proxy" + at + rtt;
                 color = Theme.GOOD;
                 break;
             default:
-                title = "TCP: ExitLag routing not verified";
+                title = "TCP: proxy routing not verified";
                 color = Theme.TEXT_DIM;
                 break;
         }
@@ -683,48 +685,67 @@ public final class GuiMonitor extends GuiBase {
         if (s == null) {
             return;
         }
-        if (!s.exitLagRunning) {
-            text(rows, "No ExitLag process found on this PC.", Theme.TEXT_DIM);
+        if (!s.proxyRunning) {
+            wrap(rows, "No proxy, optimizer or VPN process found on this PC (none known by name, and the TCP check "
+                    + "did not see a process take the game connection over).", Theme.TEXT_DIM, w);
         } else {
-            List<Snapshot.Relay> inUse = new ArrayList<Snapshot.Relay>();
+            String names = s.proxyNames.isEmpty() ? "Proxy" : s.proxyNames;
             List<String> probing = new ArrayList<String>();
             List<String> idle = new ArrayList<String>();
             for (Snapshot.Relay r : s.relays) {
-                if (r.inUse) {
-                    inUse.add(r);
-                } else if (r.verified) {
-                    probing.add(r.protocol + " " + r.endpoint() + (r.service ? " (ExitLag web/API)" : ""));
-                } else {
+                if (!r.inUse && r.verified) {
+                    probing.add(r.protocol + " " + r.endpoint() + (r.service ? " (web/API)" : ""));
+                } else if (!r.inUse) {
                     idle.add(r.protocol + " " + r.endpoint());
                 }
             }
-            text(rows, "ExitLag relays in use (verified: captured traffic on ExitLag's own sockets)", Theme.TEXT_DIM);
-            if (inUse.isEmpty()) {
-                wrap(rows, "None right now: ExitLag isn't tunnelling anything. Join the server with ExitLag on.",
+            double game = gamePing();
+            List<RelayRanking.Entry> ranked = RelayRanking.rank(s, game, RelayRanking.DEFAULT_MAX);
+            List<String> rejected = new ArrayList<String>();
+            int shown = 0;
+            text(rows, names + " relays carrying your game (best matches, up to " + RelayRanking.DEFAULT_MAX + ")",
+                    Theme.TEXT_DIM);
+            for (RelayRanking.Entry e : ranked) {
+                if (!e.accepted) {
+                    rejected.add(e.relay.protocol + " " + e.relay.endpoint() + ": " + e.reason);
+                    continue;
+                }
+                shown++;
+                Snapshot.Relay r = e.relay;
+                String lat = Double.isNaN(e.rttMs) ? "  (tracing...)" : String.format(Locale.ROOT, "  %s ms%s",
+                        ms(e.rttMs), Double.isNaN(e.beyondMs) ? "" : " +" + ms(e.beyondMs) + " ms in tunnel");
+                Row row = text(rows, shown + ". " + r.protocol + " " + r.endpoint() + lat, Theme.ACCENT);
+                List<String> tip = new ArrayList<String>(java.util.Arrays.asList(relayTip(r)));
+                tip.addAll(fontRendererObj.listFormattedStringToWidth(e.reason, 240));
+                row.tip = tip.toArray(new String[0]);
+            }
+            if (shown == 0) {
+                wrap(rows, "None right now: " + names + " isn't tunnelling the game. Join the server with it on.",
                         Theme.TEXT_FAINT, w);
             }
-            for (Snapshot.Relay r : inUse) {
-                Row row = text(rows, "IN USE  " + r.protocol + " " + r.endpoint() + String.format(Locale.ROOT,
-                        "  %.0f pkt/s", r.packetsOutPerSec + r.packetsInPerSec) + (r.primary ? "  (primary)" : ""),
-                        Theme.ACCENT);
-                row.tip = relayTip(r);
+            if (!rejected.isEmpty()) {
+                Row row = text(rows, rejected.size() + " other relay(s) in use left out (hover for why)",
+                        Theme.TEXT_FAINT);
+                row.tip = listTip("Left out:", wrapAll(rejected, 240));
             }
             if (!probing.isEmpty()) {
-                Row row = text(rows, "ExitLag is also measuring " + probing.size()
+                Row row = text(rows, names + " is also measuring " + probing.size()
                         + " other relay(s) with short probes (not routes)", Theme.TEXT_FAINT);
                 row.tip = listTip("Measured, not in use:", probing);
             }
             if (!idle.isEmpty()) {
-                Row row = text(rows, "ExitLag holds " + idle.size() + " idle TCP connection(s) (no traffic captured)",
+                Row row = text(rows, names + " holds " + idle.size() + " idle TCP connection(s) (no traffic captured)",
                         Theme.TEXT_FAINT);
-                row.tip = listTip("Idle ExitLag connections (unverified):", idle);
+                row.tip = listTip("Idle connections (unverified):", idle);
             }
-            for (Snapshot.Relay r : inUse) {
-                Snapshot.Path p = s.path(r.pathKey);
-                if (p == null) {
-                    text(rows, "Path to relay " + r.endpoint() + ": waiting to trace...", Theme.TEXT_DIM);
+            for (RelayRanking.Entry e : ranked) {
+                if (!e.accepted) {
+                    continue;
+                }
+                if (e.path == null) {
+                    text(rows, "Path to relay " + e.relay.endpoint() + ": waiting to trace...", Theme.TEXT_DIM);
                 } else {
-                    pathRows(rows, p, w);
+                    pathRows(rows, e.path, w);
                 }
             }
         }
@@ -748,7 +769,7 @@ public final class GuiMonitor extends GuiBase {
         boolean relay = "relay".equals(p.kind);
         String state = "running".equals(p.state) ? " (tracing...)" : p.reached ? ", reached" : "";
         text(rows, "", Theme.TEXT);
-        Row head = text(rows, (relay ? "Path to ExitLag relay " : "Path to server ") + p.target + ":" + p.port + " via "
+        Row head = text(rows, (relay ? "Path to relay " : "Path to server ") + p.target + ":" + p.port + " via "
                 + p.protocol + state, relay ? Theme.ACCENT : Theme.TEXT);
         head.tip = fontRendererObj.listFormattedStringToWidth("Measured " + p.traces + " time(s), last at "
                 + new SimpleDateFormat("HH:mm:ss", Locale.ROOT).format(new Date(p.updatedAt)) + ". " + p.protocol
@@ -787,7 +808,7 @@ public final class GuiMonitor extends GuiBase {
             rows.add(r);
         }
         if (relay) {
-            text(rows, "    beyond the relay: inside ExitLag's tunnel, not visible", Theme.TEXT_FAINT);
+            text(rows, "    beyond the relay: inside the proxy's tunnel, not visible", Theme.TEXT_FAINT);
         }
         if (p.note != null && !p.note.isEmpty()) {
             wrap(rows, p.note, Theme.TEXT_DIM, w);
@@ -797,7 +818,7 @@ public final class GuiMonitor extends GuiBase {
     private void icmpRows(List<Row> rows, Traceroute tr, int w) {
         text(rows, "", Theme.TEXT);
         String cmp = tr.pathComparison();
-        text(rows, "ICMP hops to the server (system traceroute, not ExitLag's route)", Theme.TEXT);
+        text(rows, "ICMP hops to the server (system traceroute, never a proxy's route)", Theme.TEXT);
         if (cmp != null) {
             wrap(rows, cmp, Theme.TEXT_DIM, w);
         }
@@ -846,18 +867,45 @@ public final class GuiMonitor extends GuiBase {
                 r.packetsInPerSec, r.bytesPerSec / 1024));
         t.add("Traffic for " + r.activeSeconds + " s, last packet " + (r.lastSeenAgoMs < 0 ? "never"
                 : (r.lastSeenAgoMs / 1000) + " s ago"));
-        t.add("Verified: traffic was captured on a socket owned by ExitLag.");
+        t.add("Verified: traffic was captured on a socket owned by " + r.process + ".");
         return t.toArray(new String[0]);
+    }
+
+    /** The player's real ping: the tab-list ping on the game server, else the measured median; NaN if unknown. */
+    private static double gamePing() {
+        PingMonitor m = NetDiag.monitor();
+        int tab = NetDiag.tabPing();
+        if (m != null && tab > 0 && NetDiag.isGameServer(m)) {
+            return tab;
+        }
+        if (m != null) {
+            StatSummary p = m.snapshot().ping;
+            if (!p.isEmpty()) {
+                return p.median;
+            }
+        }
+        return Double.NaN;
+    }
+
+    private List<String> wrapAll(List<String> items, int width) {
+        List<String> out = new ArrayList<String>();
+        for (String i : items) {
+            List<String> lines = fontRendererObj.listFormattedStringToWidth(i, width);
+            for (int k = 0; k < lines.size(); k++) {
+                out.add(k == 0 ? lines.get(k) : "    " + lines.get(k));
+            }
+        }
+        return out;
     }
 
     private static String[] listTip(String title, List<String> items) {
         List<String> t = new ArrayList<String>();
         t.add(title);
-        for (int i = 0; i < items.size() && i < 15; i++) {
+        for (int i = 0; i < items.size() && i < 24; i++) {
             t.add("  " + items.get(i));
         }
-        if (items.size() > 15) {
-            t.add("  (+" + (items.size() - 15) + " more)");
+        if (items.size() > 24) {
+            t.add("  (+" + (items.size() - 24) + " more)");
         }
         return t.toArray(new String[0]);
     }
@@ -935,22 +983,45 @@ public final class GuiMonitor extends GuiBase {
         Snapshot adv = AdvancedTracing.client().snapshot();
         if (adv != null) {
             sb.append("Advanced tracing: ").append(adv.status).append('\n');
-            for (Snapshot.Relay r : adv.relays) {
-                if (r.inUse) {
-                    sb.append(String.format(Locale.ROOT, "ExitLag relay in use: %s %s, %.0f pkt/s%s%n", r.protocol,
-                            r.endpoint(), r.packetsOutPerSec + r.packetsInPerSec, r.primary ? " (primary)" : ""));
-                }
+            double game = gamePing();
+            if (!Double.isNaN(game)) {
+                sb.append(String.format(Locale.ROOT, "Game ping used for relay matching: %.0f ms%n", game));
             }
-            for (Snapshot.Path ap : adv.paths) {
-                sb.append("Path to ").append(ap.kind).append(' ').append(ap.target).append(':').append(ap.port)
-                        .append(" via ").append(ap.protocol).append(": ").append(ap.note).append('\n');
+            List<RelayRanking.Entry> ranked = RelayRanking.rank(adv, game, RelayRanking.DEFAULT_MAX);
+            int n = 0;
+            for (RelayRanking.Entry e : ranked) {
+                if (!e.accepted) {
+                    continue;
+                }
+                Snapshot.Relay r = e.relay;
+                sb.append(String.format(Locale.ROOT, "Relay %d (%s): %s %s, %.0f pkt/s, %s%n", ++n,
+                        r.process, r.protocol, r.endpoint(), r.packetsOutPerSec + r.packetsInPerSec, e.reason));
+            }
+            int left = 0;
+            for (RelayRanking.Entry e : ranked) {
+                left += e.accepted ? 0 : 1;
+            }
+            if (left > 0) {
+                sb.append(left).append(" other relay(s) in use left out (lower traffic, idle or too far for the game ping)\n");
+            }
+            for (RelayRanking.Entry e : ranked) {
+                if (!e.accepted || e.path == null) {
+                    continue;
+                }
+                Snapshot.Path ap = e.path;
+                sb.append("Path to relay ").append(ap.target).append(':').append(ap.port).append(" via ")
+                        .append(ap.protocol).append(": ").append(ap.note).append('\n');
                 for (Snapshot.Hop h : ap.hops) {
                     sb.append(String.format(Locale.ROOT, "%3d  %-40s %-8s loss %3.0f%%%n", h.ttl,
                             h.address == null ? "*" : h.address, Double.isNaN(h.avg) ? "*" : ms(h.avg) + " ms",
                             h.lossPercent()));
                 }
-                if ("relay".equals(ap.kind)) {
-                    sb.append("     (beyond the relay: inside ExitLag's tunnel, not visible)\n");
+                sb.append("     (beyond the relay: inside the proxy's tunnel, not visible)\n");
+            }
+            for (Snapshot.Path ap : adv.paths) {
+                if ("server".equals(ap.kind)) {
+                    sb.append("Path to server ").append(ap.target).append(':').append(ap.port).append(" via ")
+                            .append(ap.protocol).append(": ").append(ap.note).append('\n');
                 }
             }
             for (Snapshot.Event e : adv.events) {
@@ -959,7 +1030,7 @@ public final class GuiMonitor extends GuiBase {
         }
         if (tr != null && !tr.hops().isEmpty()) {
             String cmp = tr.pathComparison();
-            sb.append("ICMP traceroute to ").append(tr.destination).append(" (system route, not ExitLag's)")
+            sb.append("ICMP traceroute to ").append(tr.destination).append(" (system route, never a proxy's)")
                     .append(cmp == null ? "" : ". " + cmp).append(":\n");
             for (Traceroute.Hop h : tr.hops()) {
                 double b = h.best();

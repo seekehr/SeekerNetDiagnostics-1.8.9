@@ -26,7 +26,7 @@ import java.util.Map;
  * best-effort so a Destination Unreachable, where Windows does deliver it, ends a probe early.
  *
  * <p>Also reads the system TCP table ({@code GetExtendedTcpTable}) to see which local process, if any, accepted a
- * probe, and which remote endpoints an ExitLag process holds.
+ * probe, and which remote endpoints a proxy process holds.
  */
 public final class WinTcpTrace {
     public static final int AF_INET = 2;
@@ -419,18 +419,17 @@ public final class WinTcpTrace {
     }
 
     /**
-     * Remote endpoints ("ip:port") held by processes whose executable name contains "exitlag": candidates for
-     * ExitLag's outer tunnel/relay. Only TCP is visible this way.
+     * Remote endpoints ("ip:port") held by process {@code pid}, or by every known optimizer/VPN process when
+     * {@code pid <= 0}: candidates for the proxy's relays or tunnel server. Only TCP is visible this way.
      */
-    static List<String> exitLagEndpoints() {
+    static List<String> proxyEndpoints(int pid) {
         List<String> out = new ArrayList<String>();
         for (int af : new int[]{AF_INET, AF_INET6}) {
             for (TcpRow r : tcpTable(af)) {
                 if (r.remotePort == 0 || isLoopback(r.remote) || "0.0.0.0".equals(r.remote) || "::".equals(r.remote)) {
                     continue;
                 }
-                String name = processName(r.pid);
-                if (name != null && name.toLowerCase(Locale.ROOT).contains("exitlag")) {
+                if (pid > 0 ? r.pid == pid : Proxies.known(processName(r.pid)) != null) {
                     String ep = (af == AF_INET6 ? "[" + r.remote + "]" : r.remote) + ":" + r.remotePort;
                     if (!out.contains(ep)) {
                         out.add(ep);
@@ -441,17 +440,22 @@ public final class WinTcpTrace {
         return out;
     }
 
-    /** True when any running process that holds a TCP connection or listener has "exitlag" in its name. */
-    static boolean exitLagRunning() {
+    /** Display names of known optimizers/VPNs that hold a TCP socket, comma-separated; "" when none. */
+    static String runningProxies() {
+        List<String> names = new ArrayList<String>();
         for (int af : new int[]{AF_INET, AF_INET6}) {
             for (TcpRow r : tcpTable(af)) {
-                String name = processName(r.pid);
-                if (name != null && name.toLowerCase(Locale.ROOT).contains("exitlag")) {
-                    return true;
+                String k = Proxies.known(processName(r.pid));
+                if (k != null && !names.contains(k)) {
+                    names.add(k);
                 }
             }
         }
-        return false;
+        StringBuilder sb = new StringBuilder();
+        for (String n : names) {
+            sb.append(sb.length() == 0 ? "" : ", ").append(n);
+        }
+        return sb.toString();
     }
 
     // ------------------------------------------------------------------ byte helpers

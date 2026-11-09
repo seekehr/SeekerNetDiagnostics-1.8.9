@@ -10,7 +10,7 @@ import java.util.Locale;
  * Immutable once decoded. No Minecraft classes, so the helper process can load it.
  */
 public final class Snapshot {
-    /** One remote endpoint of an ExitLag-owned socket. */
+    /** One remote endpoint of a socket owned by a proxy/optimizer/VPN process (e.g. ExitLag). */
     public static final class Relay {
         public String protocol = "UDP";
         public String ip;
@@ -22,9 +22,9 @@ public final class Snapshot {
         public double bytesPerSec;
         /** ms since a packet was last captured on it; -1 = never captured (known only from the socket table). */
         public long lastSeenAgoMs = -1;
-        /** Traffic from an ExitLag-owned socket to this endpoint was captured recently. */
+        /** Traffic from a proxy-owned socket to this endpoint was captured recently. */
         public boolean verified;
-        /** Likely ExitLag's own web/API service (HTTPS port), not a game relay; not traced. */
+        /** Likely the proxy's own web/API service (HTTPS port), not a game relay; not traced. */
         public boolean service;
         /**
          * Sustained traffic: ExitLag is tunnelling through it, not just measuring it. ExitLag constantly opens short
@@ -33,6 +33,8 @@ public final class Snapshot {
         public boolean inUse;
         /** Seconds since traffic on this endpoint was first captured (0 if never). */
         public long activeSeconds;
+        /** Age in seconds of the oldest open TCP connection to this endpoint (-1 for UDP or none). */
+        public long connSeconds = -1;
         /** Highest-traffic in-use relay. */
         public boolean primary;
         /** Key of this relay's path in {@link Snapshot#paths}, or null when not traced (yet). */
@@ -62,7 +64,7 @@ public final class Snapshot {
         }
     }
 
-    /** A hop-by-hop trace to one target (an ExitLag relay or the game server). */
+    /** A hop-by-hop trace to one target (a proxy relay or the game server). */
     public static final class Path {
         public String key;
         /** "relay" or "server". */
@@ -89,7 +91,10 @@ public final class Snapshot {
     public String status = "";
     /** True when inbound ICMP errors are being received (the firewall lets them through). */
     public boolean icmpSeen;
-    public boolean exitLagRunning;
+    /** A proxy/optimizer/VPN process was found. */
+    public boolean proxyRunning;
+    /** Display names of the proxy processes found, comma-separated. */
+    public String proxyNames = "";
     public List<Relay> relays = new ArrayList<Relay>();
     public List<Path> paths = new ArrayList<Path>();
     public List<Event> events = new ArrayList<Event>();
@@ -110,12 +115,12 @@ public final class Snapshot {
 
     public List<String> encode() {
         List<String> out = new ArrayList<String>();
-        out.add(Wire.line("STATUS", b(captureOk), status, b(icmpSeen), b(exitLagRunning)));
+        out.add(Wire.line("STATUS", b(captureOk), status, b(icmpSeen), b(proxyRunning), proxyNames));
         for (Relay r : relays) {
             out.add(Wire.line("RELAY", r.protocol, r.ip, String.valueOf(r.port), String.valueOf(r.pid),
                     r.process, d(r.packetsOutPerSec), d(r.packetsInPerSec), d(r.bytesPerSec),
                     String.valueOf(r.lastSeenAgoMs), b(r.verified), b(r.service), b(r.primary), r.pathKey,
-                    b(r.inUse), String.valueOf(r.activeSeconds)));
+                    b(r.inUse), String.valueOf(r.activeSeconds), String.valueOf(r.connSeconds)));
         }
         for (Path p : paths) {
             out.add(Wire.line("PATH", p.key, p.kind, p.protocol, p.target, String.valueOf(p.port), p.state,
@@ -142,7 +147,8 @@ public final class Snapshot {
                     s.captureOk = bool(f[1]);
                     s.status = f[2];
                     s.icmpSeen = bool(f[3]);
-                    s.exitLagRunning = bool(f[4]);
+                    s.proxyRunning = bool(f[4]);
+                    s.proxyNames = f.length >= 6 ? f[5] : "";
                 } else if ("RELAY".equals(f[0]) && f.length >= 14) {
                     Relay r = new Relay();
                     r.protocol = f[1];
@@ -161,6 +167,9 @@ public final class Snapshot {
                     if (f.length >= 16) {
                         r.inUse = bool(f[14]);
                         r.activeSeconds = Long.parseLong(f[15]);
+                    }
+                    if (f.length >= 17) {
+                        r.connSeconds = Long.parseLong(f[16]);
                     }
                     s.relays.add(r);
                 } else if ("PATH".equals(f[0]) && f.length >= 11) {

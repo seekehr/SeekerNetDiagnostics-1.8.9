@@ -1,5 +1,6 @@
 package com.seekehr.netdiagnostics.helper;
 
+import com.seekehr.netdiagnostics.core.monitor.Proxies;
 import com.seekehr.netdiagnostics.core.monitor.WinTcpTrace;
 
 import java.net.Inet4Address;
@@ -14,25 +15,30 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 
 /**
- * Finds the relays ExitLag is really using and keeps hop-by-hop traces of them (and of the game server).
+ * Finds the relays a game proxy (ExitLag, NoPing, WTFast, a VPN, or whatever process took the game connection over)
+ * is really using, and keeps hop-by-hop traces of them (and of the game server).
  *
- * <p>A relay is <b>verified</b> only when packets on a socket owned by an ExitLag process (Windows socket tables)
- * to or from that endpoint were captured within the last {@link #VERIFIED_WINDOW_MS}. ExitLag TCP connections
+ * <p>Proxy processes are the known optimizers/VPNs ({@link Proxies}) plus any PID the mod reports as having
+ * accepted the game's connection ({@link #addProxyPid}).
+ *
+ * <p>A relay is <b>verified</b> only when packets on a socket owned by a proxy process (Windows socket tables)
+ * to or from that endpoint were captured within the last {@link #VERIFIED_WINDOW_MS}. Proxy TCP connections
  * without captured traffic are listed as unverified. A verified relay is <b>in use</b> when its traffic is
- * sustained ({@link #inUse}); ExitLag also opens many short connections to candidate relays just to measure them,
+ * sustained ({@link #inUse}); optimizers such as ExitLag also open many short connections to candidate relays just to measure them,
  * and those are not routes. Only in-use relays are traced and reported as route changes. Nothing past a relay is
- * traced or guessed: the route inside ExitLag's tunnel is not visible from this PC.
+ * traced or guessed: the route inside the proxy's tunnel is not visible from this PC.
  */
 final class RelayMonitor {
     static final long VERIFIED_WINDOW_MS = 10000;
     static final long FORGET_MS = 120000;
     static final long RELAY_RETRACE_MS = 60000;
     static final long SERVER_RETRACE_MS = 120000;
-    static final int MAX_TRACED_RELAYS = 4;
+    static final int MAX_TRACED_RELAYS = 6;
     /** A relay stays "in use" until it has been silent this long, so multipath switching does not flap. */
     static final long IN_USE_HOLD_MS = 20000;
     private static final Pattern IPV4 = Pattern.compile("^\\d{1,3}(\\.\\d{1,3}){3}$");
@@ -53,7 +59,12 @@ final class RelayMonitor {
     private Set<String> active = new LinkedHashSet<String>();
     private String primary;
     private boolean firstScan = true;
-    private boolean exitLagRunning;
+    private boolean proxyRunning;
+    private String proxyNames = "";
+    /** PIDs reported by the mod as having accepted the game connection. */
+    private final Set<Integer> extraPids = java.util.Collections.newSetFromMap(new ConcurrentHashMap<Integer, Boolean>());
+    /** First time each open proxy TCP connection ("localPort remote:port") was seen. */
+    private final Map<String, Long> connFirstSeen = new HashMap<String, Long>();
     private volatile boolean icmpSeen;
     private volatile String serverIp;
     private volatile int serverPort;
@@ -91,6 +102,17 @@ final class RelayMonitor {
         retraceRequested = true;
     }
 
+    /** Treats {@code pid} as a proxy process (it accepted the game's connection). */
+    void addProxyPid(int pid) {
+        if (pid > 4) {
+            extraPids.add(pid);
+        }
+    }
+
+    boolean isProxy(int pid, String name) {
+        return extraPids.contains(pid) || Proxies.known(name) != null;
+    }
+
     void stop() {
         cancel.set(true);
     }
@@ -112,31 +134,50 @@ final class RelayMonitor {
         Map<Integer, Integer> owned = new HashMap<Integer, Integer>();
         Set<Integer> pids = new LinkedHashSet<Integer>();
         Map<String, Snapshot.Relay> found = new LinkedHashMap<String, Snapshot.Relay>();
+        Map<String, Long> connAge = new HashMap<String, Long>();
+        Set<String> seenConns = new LinkedHashSet<String>();
+        Set<String> names = new LinkedHashSet<String>();
         boolean running = false;
         for (WinTcpTrace.TcpRow r : WinTcpTrace.tcpTable(WinTcpTrace.AF_INET)) {
             String name = WinTcpTrace.processName(r.pid);
-            if (!isExitLag(name)) {
+            if (!isProxy(r.pid, name)) {
                 continue;
             }
             running = true;
+            names.add(Proxies.label(name));
             pids.add(r.pid);
             owned.put(Capture.ownerKey(Packets.TCP, r.localPort), r.pid);
             if (r.state == 5 /* ESTABLISHED */ && r.remotePort != 0 && !WinTcpTrace.isLoopback(r.remote)
                     && !"0.0.0.0".equals(r.remote)) {
                 Snapshot.Relay rel = relay("TCP", r.remote, r.remotePort, r.pid, name);
                 found.put("TCP " + rel.endpoint(), rel);
+                String ck = r.localPort + " " + rel.endpoint();
+                seenConns.add(ck);
+                Long first = connFirstSeen.get(ck);
+                if (first == null) {
+                    first = now;
+                    connFirstSeen.put(ck, now);
+                }
+                Long prevAge = connAge.get("TCP " + rel.endpoint());
+                long age = (now - first) / 1000;
+                if (prevAge == null || age > prevAge) {
+                    connAge.put("TCP " + rel.endpoint(), age);
+                }
             }
         }
+        connFirstSeen.keySet().retainAll(seenConns);
         for (WinTcpTrace.UdpRow r : WinTcpTrace.udpTable()) {
             String name = WinTcpTrace.processName(r.pid);
-            if (isExitLag(name)) {
+            if (isProxy(r.pid, name)) {
                 running = true;
+                names.add(Proxies.label(name));
                 pids.add(r.pid);
                 owned.put(Capture.ownerKey(Packets.UDP, r.localPort), r.pid);
             }
         }
         cap.setOwned(owned, pids);
-        exitLagRunning = running;
+        proxyRunning = running;
+        proxyNames = join(names);
 
         double dt = prevTick == 0 ? 0 : (now - prevTick) / 1000.0;
         prevTick = now;
@@ -181,12 +222,21 @@ final class RelayMonitor {
             }
             rel.inUse = !rel.service && held(raw, lastInUse.get(f.key()), now, age);
         }
+        for (Map.Entry<String, Snapshot.Relay> e : found.entrySet()) {
+            Long a = connAge.get(e.getKey());
+            e.getValue().connSeconds = a == null ? -1 : a;
+        }
         List<Snapshot.Relay> list = new ArrayList<Snapshot.Relay>(found.values());
         Collections.sort(list, new Comparator<Snapshot.Relay>() {
             @Override
             public int compare(Snapshot.Relay a, Snapshot.Relay b) {
                 if (a.inUse != b.inUse) {
                     return a.inUse ? -1 : 1;
+                }
+                boolean la = a.connSeconds >= RelayRanking.LONG_LIVED_S;
+                boolean lb = b.connSeconds >= RelayRanking.LONG_LIVED_S;
+                if (la != lb) {
+                    return la ? -1 : 1;
                 }
                 if (a.verified != b.verified) {
                     return a.verified ? -1 : 1;
@@ -218,19 +268,28 @@ final class RelayMonitor {
         }
         if (firstScan) {
             if (!nowActive.isEmpty()) {
-                event("Found " + nowActive.size() + " ExitLag relay(s) in use: " + join(nowActive));
+                event("Found " + nowActive.size() + " " + proxyNames + " relay(s) in use: " + join(nowActive));
             } else if (running) {
-                event("ExitLag is running; no relay is in use yet (it may only be measuring relays).");
+                event(proxyNames + " is running; no relay is in use yet (it may only be measuring relays).");
             } else {
-                event("No ExitLag process found.");
+                event("No proxy, optimizer or VPN process found yet.");
             }
             firstScan = false;
         } else {
-            for (String c : diffActive(active, nowActive)) {
+            Map<String, String> labels = new HashMap<String, String>();
+            for (Snapshot.Relay r : list) {
+                labels.put(r.protocol + " " + r.endpoint(), Proxies.label(r.process));
+            }
+            for (Snapshot.Relay r : relays) {
+                if (!labels.containsKey(r.protocol + " " + r.endpoint())) {
+                    labels.put(r.protocol + " " + r.endpoint(), Proxies.label(r.process));
+                }
+            }
+            for (String c : diffActive(active, nowActive, labels)) {
                 event(c);
             }
             if (newPrimary != null && primary != null && !newPrimary.equals(primary)) {
-                event("Primary ExitLag relay changed: " + primary + " -> " + newPrimary);
+                event("Busiest relay changed: " + primary + " -> " + newPrimary);
                 lastTraced.remove(relayKeyOf(newPrimary));
             }
         }
@@ -324,20 +383,25 @@ final class RelayMonitor {
         return raw || lastRawMs != null && lastRawMs <= now && ageMs <= IN_USE_HOLD_MS;
     }
 
-    /** Events for relays that started or stopped carrying ExitLag traffic. */
-    static List<String> diffActive(Set<String> before, Set<String> after) {
+    /** Events for relays that started or stopped carrying proxy traffic; {@code labels} maps key to proxy name. */
+    static List<String> diffActive(Set<String> before, Set<String> after, Map<String, String> labels) {
         List<String> out = new ArrayList<String>();
         for (String a : after) {
             if (!before.contains(a)) {
-                out.add("ExitLag started routing through relay " + a);
+                out.add(who(labels, a) + " started routing through relay " + a);
             }
         }
         for (String b : before) {
             if (!after.contains(b)) {
-                out.add("ExitLag stopped routing through relay " + b);
+                out.add(who(labels, b) + " stopped routing through relay " + b);
             }
         }
         return out;
+    }
+
+    private static String who(Map<String, String> labels, String key) {
+        String l = labels == null ? null : labels.get(key);
+        return l == null ? "The proxy" : l;
     }
 
     /**
@@ -389,9 +453,7 @@ final class RelayMonitor {
         return r.packetsOutPerSec + r.packetsInPerSec;
     }
 
-    static boolean isExitLag(String processName) {
-        return processName != null && processName.toLowerCase(Locale.ROOT).contains("exitlag");
-    }
+
 
     private static String relayKeyOf(String protoEndpoint) {
         int sp = protoEndpoint.indexOf(' ');
@@ -437,6 +499,7 @@ final class RelayMonitor {
         String protocol;
         String ip;
         int port;
+        String label = "The proxy";
     }
 
     private synchronized Job nextJob() {
@@ -460,6 +523,7 @@ final class RelayMonitor {
                 j.protocol = r.protocol;
                 j.ip = r.ip;
                 j.port = r.port;
+                j.label = Proxies.label(r.process);
                 lastTraced.put(key, now);
                 return j;
             }
@@ -523,8 +587,8 @@ final class RelayMonitor {
         };
         String method = job.protocol;
         String prefix = "";
-        String icmpBecause = job.protocol + " probes from this PC are taken over by ExitLag, so this path was measured "
-                + "with ICMP echo to the relay (normally the same routers). ";
+        String icmpBecause = job.protocol + " probes from this PC are taken over by " + job.label + ", so this path was "
+                + "measured with ICMP echo to the relay (normally the same routers). ";
         boolean known;
         synchronized (this) {
             known = interceptedProtocols.contains(job.protocol);
@@ -549,8 +613,8 @@ final class RelayMonitor {
                 method = "ICMP";
                 prefix = why;
             } else if (res.intercepted) {
-                prefix = "ExitLag takes TCP to the server over on this PC, so the server's real path is inside "
-                        + "ExitLag's tunnel; see the relay paths. ";
+                prefix = "A local proxy takes TCP to the server over on this PC, so the server's real path is inside "
+                        + "its tunnel; see the relay paths. ";
             }
         }
         tracing = null;
@@ -586,7 +650,8 @@ final class RelayMonitor {
         s.captureOk = captureOk;
         s.status = status;
         s.icmpSeen = icmpSeen;
-        s.exitLagRunning = exitLagRunning;
+        s.proxyRunning = proxyRunning;
+        s.proxyNames = proxyNames;
         s.relays = new ArrayList<Snapshot.Relay>(relays);
         for (Snapshot.Relay r : s.relays) {
             if (r.pathKey == null && paths.containsKey(relayKey(r.protocol, r.ip, r.port))) {

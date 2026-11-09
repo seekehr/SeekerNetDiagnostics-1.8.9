@@ -82,6 +82,7 @@ public final class NetDiag {
         ServerData d = currentServer();
         gameTarget = targetOf(d);
         tabPing = readTabPing();
+        AdvancedTracing.tick();
         PingMonitor m = monitor;
         if (d == null && m != null && !m.stopped()) {
             stop();
